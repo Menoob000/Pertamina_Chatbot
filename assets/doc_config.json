@@ -1,0 +1,26 @@
+{
+  "perusahaan": {
+    "nama_default": "PT PERTAMINA (PERSERO)",
+    "unit": "",
+    "alamat": ""
+  },
+  "styling": {
+    "font_body": "Arial",
+    "font_heading": "Arial",
+    "font_size_body": 12,
+    "font_size_heading": 14,
+    "margin_top_cm": 3.0,
+    "margin_bottom_cm": 2.5,
+    "margin_left_cm": 3.0,
+    "margin_right_cm": 2.5,
+    "line_spacing": 1.5
+  },
+  "elemen_formal": {
+    "halaman_sampul": true,
+    "lembar_pengesahan": true,
+    "daftar_isi": true,
+    "page_border": true,
+    "header_logo": true,
+    "footer_nomor_dok": true
+  }
+}
