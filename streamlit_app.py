@@ -1,7 +1,10 @@
 import os
+import re
 import json
 import uuid
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 import streamlit as st
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from agent import app, tools
@@ -58,6 +61,14 @@ st.markdown(
         background: #cfe2ff;
         border-color: #9ec5fe;
         color: #084298;
+    }
+    .download-card {
+        background-color: #f8f9fa;
+        border: 1px solid #c3e6cb;
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 8px;
+        margin-bottom: 8px;
     }
     </style>
     """,
@@ -121,6 +132,46 @@ def get_thread_messages(thread_id: str):
     except Exception as e:
         st.error(f"Error fetching state for thread {thread_id}: {e}")
     return []
+
+
+def extract_docx_path(text: str) -> Optional[str]:
+    """Finds a .docx file path or filename in text."""
+    if not text:
+        return None
+    # 1. Absolute Windows/Unix path
+    match = re.search(r'([a-zA-Z]:[\\/][^:\*\?"<>\|\r\n]+\.docx)', text)
+    if match:
+        cand = match.group(1).strip()
+        if os.path.exists(cand):
+            return cand
+
+    # 2. Filename under ./output/
+    match_file = re.search(r'([a-zA-Z0-9_\-\.\s]+\.docx)', text)
+    if match_file:
+        cand_name = match_file.group(1).strip()
+        local_cand = os.path.join("output", cand_name)
+        if os.path.exists(local_cand):
+            return os.path.abspath(local_cand)
+
+    return None
+
+
+def render_docx_download_button(file_path: str, key: str):
+    """Renders a styled download button for a .docx file."""
+    if file_path and os.path.exists(file_path):
+        fname = os.path.basename(file_path)
+        file_size_kb = os.path.getsize(file_path) / 1024
+        with open(file_path, "rb") as f:
+            data = f.read()
+        
+        st.download_button(
+            label=f"📥 Download DOCX ({fname} - {file_size_kb:.1f} KB)",
+            data=data,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=key,
+            type="primary",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +249,6 @@ with st.sidebar:
     for t in tools:
         t_name = getattr(t, "name", str(t))
         t_desc = getattr(t, "description", "")
-        # Check if this tool is currently executing
         is_tool_running = (st.session_state.active_tool_now == t_name)
         active_class = "tool-active" if is_tool_running else ""
         
@@ -208,6 +258,26 @@ with st.sidebar:
                 unsafe_allow_html=True,
             )
             st.caption(t_desc.strip().split("\n")[0])
+
+    # Exported Files in ./output/
+    output_dir = Path("./output")
+    if output_dir.exists():
+        docx_files = sorted(list(output_dir.glob("*.docx")), key=os.path.getmtime, reverse=True)
+        if docx_files:
+            with st.expander(f"📁 Exported Documents ({len(docx_files)})", expanded=True):
+                for f_idx, docx_file in enumerate(docx_files[:5]):
+                    f_name = docx_file.name
+                    f_size = docx_file.stat().st_size / 1024
+                    st.markdown(f"**📄 {f_name}** `({f_size:.1f} KB)`")
+                    with open(docx_file, "rb") as df:
+                        st.download_button(
+                            label=f"⬇️ Download",
+                            data=df.read(),
+                            file_name=f_name,
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key=f"sidebar_dl_{f_idx}_{f_name}",
+                            use_container_width=True,
+                        )
 
     # Tool Execution History for this thread
     st.markdown("**Recent Tool Calls in this Thread:**")
@@ -245,7 +315,6 @@ st.divider()
 thread_messages = get_thread_messages(current_thread_id)
 
 # Render conversation history
-# We correlate AIMessage with tool_calls and their following ToolMessage(s)
 i = 0
 while i < len(thread_messages):
     msg = thread_messages[i]
@@ -260,6 +329,8 @@ while i < len(thread_messages):
         i += 1
 
     elif isinstance(msg, AIMessage):
+        detected_file_path = None
+
         # Check if this AIMessage contains tool calls
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
@@ -282,14 +353,28 @@ while i < len(thread_messages):
                             st.write("**Tool Output / Result:**")
                             st.text(str(matching_tool_msg.content)[:1000])
 
+                if matching_tool_msg:
+                    f_cand = extract_docx_path(str(matching_tool_msg.content))
+                    if f_cand:
+                        detected_file_path = f_cand
+
         # If the AIMessage has direct text content, render it
         if msg.content:
             with st.chat_message("assistant"):
                 st.markdown(msg.content)
+                # Check for docx mention in message text as well
+                f_cand = extract_docx_path(msg.content)
+                if f_cand:
+                    detected_file_path = f_cand
+
+        # Render download button if this turn produced a docx file
+        if detected_file_path:
+            with st.chat_message("assistant"):
+                render_docx_download_button(detected_file_path, key=f"hist_msg_dl_{i}_{uuid.uuid4().hex[:4]}")
+
         i += 1
 
     elif isinstance(msg, ToolMessage):
-        # Already handled above alongside AIMessage tool_calls
         i += 1
     else:
         i += 1
@@ -298,7 +383,7 @@ while i < len(thread_messages):
 # ---------------------------------------------------------------------------
 # Chat Input & Streaming Execution
 # ---------------------------------------------------------------------------
-user_prompt = st.chat_input("Ask a question or request a document...")
+user_prompt = st.chat_input("Ask a question, generate an RKS, or export to DOCX...")
 
 if user_prompt:
     # 1. Immediately render user's message in UI
@@ -315,9 +400,9 @@ if user_prompt:
     input_state = {"messages": [HumanMessage(content=user_prompt)]}
 
     with st.chat_message("assistant"):
-        # We stream node updates to monitor tools and final answers live
         response_placeholder = st.empty()
         final_answer = ""
+        generated_docx_path = None
 
         try:
             for event in app.stream(input_state, config=config, stream_mode="updates"):
@@ -361,6 +446,11 @@ if user_prompt:
                         
                         st.info(f"✅ **Tool `{tm.name}` completed:** {preview}")
 
+                        # Check if export_to_docx produced a file
+                        f_cand = extract_docx_path(tm_content)
+                        if f_cand:
+                            generated_docx_path = f_cand
+
                         # Update last tool history entry with result preview
                         history = st.session_state.threads[current_thread_id]["tool_history"]
                         if history:
@@ -373,6 +463,10 @@ if user_prompt:
             # Final response render
             if final_answer:
                 response_placeholder.markdown(final_answer)
+
+            # Show download button if docx was generated
+            if generated_docx_path:
+                render_docx_download_button(generated_docx_path, key=f"stream_run_dl_{uuid.uuid4().hex[:6]}")
 
         except Exception as e:
             st.session_state.active_tool_now = None
