@@ -28,10 +28,10 @@ def search_tool(query : str):
     return response
 
 @tool 
-def fetch_full_documents(query : str):
-    """Fetch the full document matching the user query from the document repository. Use this tool when the user asks for a full document."""
+def fetch_full_documents(query : str) -> Dict[str, Any]:
+    """Fetch the full document matching the user query from the document repository. Returns the document content and its title."""
     response = fetch_full_document(query)
-    return {'full_docs' : response}
+    return response
 
 # Backward compatibility alias
 return_full_docs = fetch_full_documents
@@ -43,24 +43,32 @@ def export_to_docx(state: Annotated[dict, InjectedState], output_filename: str =
     The tool automatically retrieves the last document fetched by 'fetch_full_documents' from the conversation history.
     """
     doc_content = ""
+    doc_title = title
 
     # 1. Inspect previous messages specifically for the last document fetched by fetch_full_documents / return_full_docs
     messages = state.get("messages", [])
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in ("fetch_full_documents", "return_full_docs", "fetch_full_document"):
             content = msg.content
-            if isinstance(content, dict) and "full_docs" in content:
-                doc_content = content["full_docs"]
-                break
+            if isinstance(content, dict):
+                if "full_docs" in content:
+                    doc_content = content["full_docs"]
+                if not doc_title and "title" in content:
+                    doc_title = content["title"]
+                if doc_content:
+                    break
             elif isinstance(content, str) and content:
-                # If content is a stringified dict representation, try to extract 'full_docs'
                 if "'full_docs':" in content or '"full_docs":' in content:
                     try:
                         import ast
                         parsed_dict = ast.literal_eval(content)
-                        if isinstance(parsed_dict, dict) and "full_docs" in parsed_dict:
-                            doc_content = parsed_dict["full_docs"]
-                            break
+                        if isinstance(parsed_dict, dict):
+                            if "full_docs" in parsed_dict:
+                                doc_content = parsed_dict["full_docs"]
+                            if not doc_title and "title" in parsed_dict:
+                                doc_title = parsed_dict["title"]
+                            if doc_content:
+                                break
                     except Exception:
                         pass
                 doc_content = content
@@ -77,13 +85,14 @@ def export_to_docx(state: Annotated[dict, InjectedState], output_filename: str =
         )
 
     # 3. Parse the fetched document into RKS structure and render
-    rks_data = parse_text_to_rks_data(doc_content, custom_title=title)
+    rks_data = parse_text_to_rks_data(doc_content, custom_title=doc_title)
 
     try:
         saved_path = render_to_docx(draft_data=rks_data, output_filename=output_filename)
         filename = os.path.basename(saved_path)
         return (
             f"Document successfully exported to DOCX format!\n"
+            f"- Title: {doc_title or rks_data['cover_page']['judul_pekerjaan']}\n"
             f"- File: {filename}\n"
             f"- Path: {saved_path}\n"
             f"The document is ready for download."
@@ -108,11 +117,12 @@ def agent_node(state: AgentState) -> dict:
         content=(
             "You are an intelligent knowledge base assistant for Pertamina.\n"
             "You have access to the following tools:\n"
-            "1. 'fetch_full_documents': Use this when the user asks for a document or RKS. Always fetch the document using this tool.\n"
+            "1. 'fetch_full_documents': Use this when the user asks for a document or RKS template. Returns the document text and its title.\n"
             "2. 'search_tool': Use this when you need live internet information.\n"
-            "3. 'fetch_relevant_documents': Use this tool when the user asks specific questions about documents.\n"
-            "4. 'export_to_docx': Use this tool when the user asks to export, download, or convert the document to Word / DOCX / docs format. It renders the last document fetched by 'fetch_full_documents'.\n"
-            "If the user asks to fetch and export a document in a single request, call 'fetch_full_documents' first, then call 'export_to_docx'."
+            "3. 'fetch_relevant_documents': Use this tool when the user asks specific questions about documents. Returns relevant snippets with their document titles.\n"
+            "4. 'export_to_docx': Use this tool when the user asks to export, download, or convert the document to Word / DOCX / docs format. It renders the last document fetched by 'fetch_full_documents'.\n\n"
+            "IMPORTANT CITATION RULE:\n"
+            "Whenever you answer using information retrieved from 'fetch_full_documents' or 'fetch_relevant_documents', always cite and display the document's Title (e.g. '📄 Dokumen: <title>') prominently at the beginning or in your response so the user clearly sees which document was consulted."
         )
     )
     

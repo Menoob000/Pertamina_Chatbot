@@ -2,6 +2,7 @@ import os
 import re
 import json
 import uuid
+import ast
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -36,7 +37,6 @@ st.markdown(
         color: #0F172A;
     }
 
-    /* Hide standard Streamlit header chrome for a native web app feel */
     header[data-testid="stHeader"] {
         background-color: rgba(255, 255, 255, 0.95);
         border-bottom: 1px solid #F1F5F9;
@@ -45,7 +45,7 @@ st.markdown(
         display: none !important;
     }
 
-    /* Professional Sidebar */
+    /* Sidebar */
     section[data-testid="stSidebar"] {
         background-color: #F8FAFC;
         border-right: 1px solid #E2E8F0;
@@ -107,7 +107,7 @@ st.markdown(
         box-shadow: 0 1px 3px rgba(0,0,0,0.02);
     }
 
-    /* Tool Call Card Badges */
+    /* Badges */
     .tool-badge-blue {
         background-color: #EFF6FF;
         color: #0072CE;
@@ -125,6 +125,19 @@ st.markdown(
         border-radius: 12px;
         font-weight: 600;
         font-size: 0.75rem;
+    }
+    .doc-title-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #F0FDF4;
+        border: 1px solid #BBF7D0;
+        color: #166534;
+        padding: 4px 10px;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 0.82rem;
+        margin: 4px 0;
     }
 
     /* Split-Screen Document Paper Viewer */
@@ -153,6 +166,7 @@ st.markdown(
         font-weight: 700;
         color: #0F172A;
         margin-bottom: 0.3rem;
+        word-break: break-word;
     }
     .doc-metadata-pill {
         display: inline-block;
@@ -172,6 +186,7 @@ st.markdown(
         font-weight: 600;
         background-color: #FEF2F2;
         color: #ED1C24;
+        margin-right: 6px;
     }
     .doc-paper-body {
         max-height: 65vh;
@@ -182,7 +197,7 @@ st.markdown(
         color: #1E293B;
     }
 
-    /* Empty state placeholder for document viewer */
+    /* Empty state */
     .doc-empty-state {
         text-align: center;
         padding: 4rem 1.5rem;
@@ -192,7 +207,7 @@ st.markdown(
         background-color: #FAFAFA;
     }
 
-    /* DOCX Download Card */
+    /* Download Card */
     .download-card {
         display: flex;
         align-items: center;
@@ -241,7 +256,6 @@ st.markdown(
         line-height: 1.4;
     }
 
-    /* Primary buttons */
     button[kind="primary"] {
         background-color: #0072CE !important;
         border-color: #0072CE !important;
@@ -254,7 +268,6 @@ st.markdown(
         border-color: #005bb5 !important;
     }
 
-    /* Input box */
     div[data-testid="stChatInput"] {
         border-radius: 16px !important;
     }
@@ -349,30 +362,39 @@ def extract_docx_path(text: str) -> Optional[str]:
 
 
 def get_current_thread_document(thread_id: str) -> Optional[Dict[str, Any]]:
-    """Retrieves the latest document fetched by fetch_full_documents or generated in this thread."""
+    """Retrieves the latest document fetched by fetch_full_documents or generated in this thread along with its title."""
     messages = get_thread_messages(thread_id)
     for msg in reversed(messages):
         # 1. Check ToolMessage from fetch_full_documents / return_full_docs
         if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in ("fetch_full_documents", "return_full_docs", "fetch_full_document"):
             content = msg.content
             doc_str = ""
-            if isinstance(content, dict) and "full_docs" in content:
-                doc_str = content["full_docs"]
+            doc_title = ""
+            source_file = ""
+
+            if isinstance(content, dict):
+                doc_str = content.get("full_docs", "")
+                doc_title = content.get("title", "")
+                source_file = content.get("source_file", "")
             elif isinstance(content, str):
                 if "'full_docs':" in content or '"full_docs":' in content:
                     try:
-                        import ast
                         parsed_dict = ast.literal_eval(content)
-                        if isinstance(parsed_dict, dict) and "full_docs" in parsed_dict:
-                            doc_str = parsed_dict["full_docs"]
+                        if isinstance(parsed_dict, dict):
+                            doc_str = parsed_dict.get("full_docs", "")
+                            doc_title = parsed_dict.get("title", "")
+                            source_file = parsed_dict.get("source_file", "")
                     except Exception:
                         pass
                 if not doc_str:
                     doc_str = content
+
             if doc_str and len(doc_str.strip()) > 20:
                 return {
                     "source": "fetch_full_documents",
                     "content": doc_str,
+                    "title": doc_title or source_file or "Fetched RKS Document",
+                    "source_file": source_file,
                 }
 
         # 2. Check AIMessage containing substantial RKS structure
@@ -381,8 +403,48 @@ def get_current_thread_document(thread_id: str) -> Optional[Dict[str, Any]]:
                 return {
                     "source": "generated_rks",
                     "content": msg.content,
+                    "title": "Generated RKS Draft",
+                    "source_file": "",
                 }
     return None
+
+
+def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
+    """Nicely formats and displays RAG tool outputs to highlight document titles."""
+    content = raw_content
+    if isinstance(content, str):
+        if content.startswith("{") or content.startswith("["):
+            try:
+                content = ast.literal_eval(content)
+            except Exception:
+                pass
+
+    if tc_name == "fetch_full_documents" and isinstance(content, dict):
+        title = content.get("title", "Untitled Document")
+        st.markdown(f"<div class='doc-title-badge'>📄 Document Title: <strong>{title}</strong></div>", unsafe_allow_html=True)
+        full_text = content.get("full_docs", "")
+        st.caption(f"Fetched full content ({len(full_text)} characters). Preview below:")
+        st.text(full_text[:600] + ("..." if len(full_text) > 600 else ""))
+        return
+
+    if tc_name == "fetch_relevant_documents" and isinstance(content, list):
+        st.markdown(f"**Retrieved {len(content)} Document Passages:**")
+        for idx, item in enumerate(content, 1):
+            if isinstance(item, dict):
+                t = item.get("title") or item.get("document_title", "Unknown Document")
+                score = item.get("relevance_score") or item.get("score", "N/A")
+                snippet = str(item.get("content", ""))[:220]
+                st.markdown(f"{idx}. <span class='doc-title-badge'>📄 {t}</span> <span style='font-size:0.75rem; color:#64748B;'>Score: {score}</span>", unsafe_allow_html=True)
+                st.caption(f"> {snippet}...")
+            elif isinstance(item, tuple) and len(item) == 2:
+                doc, score = item
+                t = getattr(doc, "metadata", {}).get("file_name", "Unknown Document")
+                st.markdown(f"{idx}. <span class='doc-title-badge'>📄 {t}</span> <span style='font-size:0.75rem; color:#64748B;'>Score: {round(float(score), 3)}</span>", unsafe_allow_html=True)
+                st.caption(f"> {doc.page_content[:220]}...")
+        return
+
+    # Default fallback
+    st.text(str(raw_content)[:800])
 
 
 def render_docx_download_card(file_path: str, key: str):
@@ -415,7 +477,6 @@ def render_docx_download_card(file_path: str, key: str):
         )
 
 
-# Avatars
 AVATAR_ASSISTANT = "assets/logo_pertamina.png" if os.path.exists("assets/logo_pertamina.png") else "🤖"
 AVATAR_USER = "👤"
 
@@ -432,7 +493,6 @@ with st.sidebar:
     st.caption("AI Document & Knowledge Assistant")
     st.write("")
 
-    # "+ New Chat" Button
     if st.button("➕ New Chat", key="btn_create_new_thread", use_container_width=True, type="primary"):
         create_new_thread()
         st.rerun()
@@ -573,7 +633,7 @@ with chat_col:
                 </div>
                 <div class="hero-title">Pertamina Document Assistant</div>
                 <div class="hero-sub">
-                    Retrieve official RKS document templates, inspect them live in the split viewer, and export formatted DOCX files.
+                    Retrieve official RKS document templates, inspect them live with exact document titles, and export formatted DOCX files.
                 </div>
             </div>
             """,
@@ -635,8 +695,8 @@ with chat_col:
                             st.write("**Inputs:**")
                             st.json(tc_args)
                             if matching_tool_msg:
-                                st.write("**Output Result:**")
-                                st.text(str(matching_tool_msg.content)[:800])
+                                st.write("**Tool Results:**")
+                                format_tool_output_display(tc_name, matching_tool_msg.content)
 
                     if matching_tool_msg:
                         f_cand = extract_docx_path(str(matching_tool_msg.content))
@@ -686,7 +746,7 @@ if doc_col:
                     <span style="font-size:2.4rem;">📑</span>
                     <h4 style="margin-top:10px; margin-bottom:6px; color:#334155;">No Document Loaded</h4>
                     <p style="font-size:0.85rem; max-width:340px; margin:0 auto; line-height:1.4;">
-                        Ask the assistant to fetch an RKS (e.g. <em>"Ambilkan RKS overhaul tangki"</em>) to inspect its full content here in real time.
+                        Ask the assistant to fetch an RKS (e.g. <em>"Ambilkan RKS overhaul tangki"</em>) to inspect its full content and document title here.
                     </p>
                 </div>
                 """,
@@ -694,21 +754,24 @@ if doc_col:
             )
         else:
             doc_raw = current_doc_data["content"]
-            parsed_rks = parse_text_to_rks_data(doc_raw)
-            doc_title = parsed_rks.get("cover_page", {}).get("judul_pekerjaan", "DOKUMEN RKS")
+            rag_doc_title = current_doc_data.get("title", "")
+            source_file = current_doc_data.get("source_file", "")
+
+            parsed_rks = parse_text_to_rks_data(doc_raw, custom_title=rag_doc_title)
+            display_title = rag_doc_title or parsed_rks.get("cover_page", {}).get("judul_pekerjaan", "DOKUMEN RKS")
             doc_csms = parsed_rks.get("cover_page", {}).get("resiko_csms", "HIGH")
             doc_no = parsed_rks.get("metadata", {}).get("nomor_dokumen", "RKS/PERTAMINA/2026")
             babs = parsed_rks.get("bab", [])
 
-            # Paper Card Container
+            # Paper Card Container showing explicit document title
             st.markdown(
                 f"""
                 <div class="doc-viewer-container">
                     <div class="doc-top-stripe"></div>
                     <div class="doc-paper-header">
-                        <div class="doc-paper-title">{doc_title}</div>
-                        <div>
-                            <span class="doc-metadata-pill">No: {doc_no}</span>
+                        <div class="doc-paper-title">📄 {display_title}</div>
+                        <div style="margin-top:6px;">
+                            <span class="doc-metadata-pill">📁 File: {source_file or display_title}</span>
                             <span class="doc-metadata-csms">CSMS: {doc_csms}</span>
                             <span class="doc-metadata-pill">{len(babs)} Bab</span>
                         </div>
@@ -748,7 +811,7 @@ if doc_col:
 
             with tab_export:
                 st.markdown("#### Document Export Options")
-                st.caption("Directly export this loaded RKS document to standard Pertamina DOCX format.")
+                st.caption(f"Export '{display_title}' into standard Pertamina DOCX format.")
 
                 col_exp1, col_exp2 = st.columns(2)
                 with col_exp1:
@@ -781,12 +844,10 @@ if user_prompt:
         with st.chat_message("user", avatar=AVATAR_USER):
             st.markdown(user_prompt)
 
-    # Auto-rename thread on first query
     if current_thread["title"].startswith("Chat ") and len(thread_messages) == 0:
         suggested_title = user_prompt.strip()[:24] + ("..." if len(user_prompt.strip()) > 24 else "")
         st.session_state.threads[current_thread_id]["title"] = suggested_title
 
-    # Run LangGraph Workflow
     config = {"configurable": {"thread_id": current_thread_id}}
     input_state = {"messages": [HumanMessage(content=user_prompt)]}
 
@@ -833,18 +894,26 @@ if user_prompt:
                         tool_output = event["tools"]
                         tool_msgs = tool_output.get("messages", [])
                         for tm in tool_msgs:
-                            tm_content = str(tm.content)
-                            preview = tm_content[:250] + ("..." if len(tm_content) > 250 else "")
+                            tm_content = tm.content
+                            # Check if fetch_full_documents or fetch_relevant_documents
+                            if tm.name == "fetch_full_documents" and isinstance(tm_content, dict):
+                                fetched_title = tm_content.get("title", "Untitled Document")
+                                st.success(f"📄 **Document Fetched:** `{fetched_title}`")
+                            elif tm.name == "fetch_relevant_documents" and isinstance(tm_content, list):
+                                titles = list({item.get("title") for item in tm_content if isinstance(item, dict) and item.get("title")})
+                                if titles:
+                                    st.info(f"🔍 **Matched Documents:** {', '.join([f'`{t}`' for t in titles])}")
+                            else:
+                                preview = str(tm_content)[:250] + ("..." if len(str(tm_content)) > 250 else "")
+                                st.info(f"✅ **Tool `{tm.name}` completed:** {preview}")
 
-                            st.info(f"✅ **Tool `{tm.name}` completed:** {preview}")
-
-                            f_cand = extract_docx_path(tm_content)
+                            f_cand = extract_docx_path(str(tm_content))
                             if f_cand:
                                 generated_docx_path = f_cand
 
                             history = st.session_state.threads[current_thread_id]["tool_history"]
                             if history:
-                                history[-1]["result_preview"] = preview
+                                history[-1]["result_preview"] = str(tm_content)[:250]
                                 history[-1]["status"] = "completed"
 
                 st.session_state.active_tool_now = None
