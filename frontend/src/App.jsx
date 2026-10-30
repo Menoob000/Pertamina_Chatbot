@@ -6,6 +6,9 @@ import {
   MessageCircle, MoreHorizontal, PanelRightClose, PanelRightOpen, Plus,
   Search, Send, Settings2, ShieldCheck, Sparkles, Trash2, X,
 } from 'lucide-react'
+import { api } from './api.js'
+import DocumentPanel from './DocumentPanel.jsx'
+import ConversionDialog from './ConversionDialog.jsx'
 
 const STORAGE_KEY = 'pertamina-react-template-v1'
 const INITIAL_THREAD = { id: 'welcome', title: 'Percakapan baru', messages: [], tools: [], document: null, createdAt: Date.now() }
@@ -31,6 +34,24 @@ const quickActions = [
 
 function createThread() {
   return { id: crypto.randomUUID(), title: 'Percakapan baru', messages: [], tools: [], document: null, createdAt: Date.now() }
+}
+
+function mapDocument(document) {
+  return {
+    id: document.id,
+    title: document.title,
+    filename: document.source_file || document.title,
+    number: document.document_number || '—',
+    category: document.csms_category || '—',
+    chapters: document.chapters.map((chapter) => ({
+      no: chapter.number,
+      title: chapter.title,
+      sections: chapter.sections,
+    })),
+    content: document.content,
+    canConvert: document.can_convert,
+    pdfUrl: document.pdf_url,
+  }
 }
 
 function createDemoResponse(prompt, hasDocument) {
@@ -74,6 +95,9 @@ function App() {
   const [notice, setNotice] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [mode, setMode] = useState('demo')
+  const [conversion, setConversion] = useState(null)
+  const [converting, setConverting] = useState(false)
   const bottomRef = useRef(null)
   const active = session.threads.find((thread) => thread.id === session.activeId) || session.threads[0]
   const filteredThreads = session.threads.filter((thread) => thread.title.toLowerCase().includes(search.toLowerCase()))
@@ -81,6 +105,7 @@ function App() {
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(session)) }, [session])
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [active?.messages.length, busy])
   useEffect(() => { if (notice) { const timer = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(timer) } }, [notice])
+  useEffect(() => { api.health().then(() => setMode('live')).catch(() => setMode('demo')) }, [])
   useEffect(() => {
     function closeOnEscape(event) {
       if (event.key !== 'Escape') return
@@ -101,31 +126,85 @@ function App() {
     setPrompt('')
     setDocTab('preview')
     setSidebarOpen(false)
+    setConversion(null)
   }
 
-  function submitMessage(value = prompt) {
+  async function submitMessage(value = prompt) {
     const text = value.trim()
     if (!text || busy) return
     const threadId = active.id
     const hadDocument = Boolean(active.document)
+    const userMessageId = crypto.randomUUID()
     setPrompt('')
     setBusy(true)
     updateThread(threadId, (thread) => ({ ...thread,
       title: thread.messages.length ? thread.title : text.slice(0, 27) + (text.length > 27 ? '…' : ''),
-      messages: [...thread.messages, { id: crypto.randomUUID(), role: 'user', text, at: Date.now() }],
+      messages: [...thread.messages, { id: userMessageId, role: 'user', text, at: Date.now() }],
     }))
-    setTimeout(() => {
-      const answer = createDemoResponse(text, hadDocument)
+    if (mode === 'demo') {
+      setTimeout(() => {
+        const answer = createDemoResponse(text, hadDocument)
+        updateThread(threadId, (thread) => ({ ...thread,
+          document: answer.document || thread.document,
+          messages: [...thread.messages, { id: crypto.randomUUID(), role: 'assistant', text: answer.text, at: Date.now(), tool: answer.tool }],
+          tools: answer.tool ? [{ name: answer.tool, at: Date.now(), status: 'Demo' }, ...thread.tools] : thread.tools,
+        }))
+        setBusy(false)
+      }, 650)
+      return
+    }
+    try {
+      let apiThreadId = active.apiThreadId
+      if (!apiThreadId) {
+        const created = await api.createThread(active.title === 'Percakapan baru' ? text.slice(0, 60) : active.title)
+        apiThreadId = created.id
+        updateThread(threadId, (thread) => ({ ...thread, apiThreadId }))
+      }
+      let answer
+      try {
+        answer = await api.sendMessage(apiThreadId, text)
+      } catch (error) {
+        if (error.code !== 'thread_not_found') throw error
+        const created = await api.createThread(active.title)
+        apiThreadId = created.id
+        updateThread(threadId, (thread) => ({ ...thread, apiThreadId }))
+        answer = await api.sendMessage(apiThreadId, text)
+        setNotice('Sesi backend sebelumnya tidak tersedia; sesi baru telah dimulai.')
+      }
+      let document = null
+      if (answer.document_id) {
+        try {
+          document = mapDocument(await api.getDocument(answer.document_id))
+        } catch {
+          setNotice('Jawaban diterima, tetapi pratinjau dokumen belum dapat dimuat.')
+        }
+      }
       updateThread(threadId, (thread) => ({ ...thread,
-        document: answer.document || thread.document,
-        messages: [...thread.messages, { id: crypto.randomUUID(), role: 'assistant', text: answer.text, at: Date.now(), tool: answer.tool }],
-        tools: answer.tool ? [{ name: answer.tool, at: Date.now(), status: 'Demo' }, ...thread.tools] : thread.tools,
+        document: document || thread.document,
+        messages: [...thread.messages, {
+          id: answer.message.id, role: 'assistant', text: answer.message.content,
+          at: new Date(answer.message.created_at).getTime(),
+          tool: answer.tool_events.find((event) => event.status === 'completed')?.name,
+          source: 'api',
+        }],
+        tools: [...answer.tool_events, ...thread.tools],
       }))
+      if (document) setConversion(null)
+    } catch (error) {
+      updateThread(threadId, (thread) => ({ ...thread,
+        messages: thread.messages.filter((message) => message.id !== userMessageId),
+      }))
+      setPrompt(text)
+      setNotice(error.message)
+    } finally {
       setBusy(false)
-    }, 650)
+    }
   }
 
   function deleteThread() {
+    if (mode === 'live' && active.apiThreadId) {
+      api.deleteThread(active.apiThreadId).catch((error) => setNotice(error.message))
+    }
     setSession((previous) => {
       const remaining = previous.threads.filter((thread) => thread.id !== previous.activeId)
       if (remaining.length) return { threads: remaining, activeId: remaining[0].id }
@@ -138,12 +217,42 @@ function App() {
 
   function renameThread() {
     const title = window.prompt('Nama percakapan', active.title)?.trim()
-    if (title) updateThread(active.id, (thread) => ({ ...thread, title }))
+    if (title) {
+      updateThread(active.id, (thread) => ({ ...thread, title }))
+      if (mode === 'live' && active.apiThreadId) {
+        api.renameThread(active.apiThreadId, title).catch((error) => setNotice(error.message))
+      }
+    }
     setMenuOpen(false)
   }
 
   function copyResponse(text) {
     navigator.clipboard?.writeText(text).then(() => setNotice('Jawaban disalin ke clipboard')).catch(() => setNotice('Clipboard tidak tersedia di browser ini'))
+  }
+
+  async function connectBackend() {
+    try {
+      await api.health()
+      setMode('live')
+      setNotice('Backend terhubung. Pesan berikutnya akan diproses oleh agent.')
+    } catch {
+      setMode('demo')
+      setNotice('Backend belum tersedia di port 8000. Mode demo tetap aktif.')
+    }
+  }
+
+  async function runConversion() {
+    if (!active.document?.id || !active.document.canConvert) return
+    setConverting(true)
+    try {
+      const result = await api.convert(active.document.id)
+      setConversion(result)
+      setNotice('DOCX siap diunduh.')
+    } catch (error) {
+      setNotice(error.message)
+    } finally {
+      setConverting(false)
+    }
   }
 
   return <div className="app-shell">
@@ -160,29 +269,29 @@ function App() {
       <div className="history-heading"><span>RIWAYAT PERCAKAPAN</span><History size={15} /></div>
       <label className="history-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari percakapan..." aria-label="Cari percakapan" /></label>
       <div className="history-list">{filteredThreads.length ? filteredThreads.map((thread) => <button key={thread.id} className={`history-item ${thread.id === active.id ? 'active' : ''}`} onClick={() => { setSession((previous) => ({ ...previous, activeId: thread.id })); setSidebarOpen(false); setDocTab('preview') }}><MessageCircle size={16} /><span>{thread.title}</span>{thread.id === active.id && <span className="history-active-dot" />}</button>) : <p className="history-empty">Tidak ada percakapan</p>}</div>
-      <div className="sidebar-bottom"><div className="demo-status"><span className="pulse-dot" /> MODE PRATINJAU <small>Data demo lokal</small></div><div className="profile"><div className="profile-avatar">PN</div><div><strong>Tim Pengadaan</strong><small>Pertamina Patra Niaga</small></div><Settings2 size={17} /></div></div>
+      <div className="sidebar-bottom"><div className="demo-status"><span className="pulse-dot" /> {mode === 'live' ? 'BACKEND TERHUBUNG' : 'MODE PRATINJAU'} <small>{mode === 'live' ? 'Respons dari agent asli' : 'Data demo lokal'}</small></div><div className="profile"><div className="profile-avatar">PN</div><div><strong>Tim Pengadaan</strong><small>Pertamina Patra Niaga</small></div><Settings2 size={17} /></div></div>
     </aside>
 
     <div className="main-area">
-      <header className="topbar"><div className="topbar-left"><button className="mobile-menu icon-button" aria-label="Buka menu" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="breadcrumb">Workspace <ChevronRight size={15} /> <span>Asisten AI</span></div></div><div className="topbar-right"><span className="preview-pill"><span /> Preview template</span><button className="help-button" onClick={() => setNotice('Template ini belum terhubung ke API backend. Semua respons menggunakan data demo.')}><CircleHelp size={18} /> <span>Bantuan</span></button></div></header>
+      <header className="topbar"><div className="topbar-left"><button className="mobile-menu icon-button" aria-label="Buka menu" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="breadcrumb">Workspace <ChevronRight size={15} /> <span>Asisten AI</span></div></div><div className="topbar-right"><button className="preview-pill" type="button" onClick={connectBackend} title="Periksa koneksi backend"><span /> {mode === 'live' ? 'Backend terhubung' : 'Mode demo · Coba hubungkan'}</button><button className="help-button" onClick={() => setNotice(mode === 'live' ? 'Chat memakai backend; riwayat sesi masih disimpan sementara.' : 'Mode demo aktif. Jalankan backend di port 8000 lalu klik status koneksi.')}><CircleHelp size={18} /> <span>Bantuan</span></button></div></header>
       <div className="content-top"><div><div className="eyebrow"><span /> INTELLIGENT DOCUMENT WORKSPACE</div><h1>Asisten Dokumen <span>Pertamina</span></h1><p>Temukan informasi pengadaan, tinjau dokumen RKS, dan siapkan konversi dalam satu ruang kerja.</p></div><div className="content-actions"><button className="outline-button" onClick={() => setViewerOpen(!viewerOpen)}>{viewerOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}{viewerOpen ? 'Sembunyikan viewer' : 'Tampilkan viewer'}</button><button className="primary-button" onClick={() => { setViewerOpen(true); setDocTab('convert'); if (active.document) setConvertOpen(true); else setNotice('Ambil contoh dokumen RKS dahulu melalui chat') }}><FileCheck2 size={17} /> Konversi PDF</button></div></div>
 
       <div className={`work-grid ${viewerOpen ? '' : 'full-chat'}`}>
         <section className="chat-panel" aria-label="Percakapan"><div className="panel-heading"><div className="panel-heading-icon"><MessageCircle size={19} /></div><div><strong>{active.title}</strong><small>Asisten pengadaan berbasis dokumen</small></div><div className="panel-menu"><button className="icon-button more-button" aria-label="Opsi percakapan" onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={20} /></button>{menuOpen && <div className="dropdown"><button onClick={renameThread}><FileText size={15} /> Ubah nama</button><button onClick={deleteThread}><Trash2 size={15} /> Hapus percakapan</button></div>}</div></div>
-          <div className="chat-scroll">{active.messages.length === 0 ? <div className="empty-chat"><div className="assistant-orbit"><div className="orbit-inner"><Sparkles size={27} /></div></div><div className="welcome-kicker">SELAMAT DATANG</div><h2>Halo, ada yang bisa<br /><em>saya bantu?</em></h2><p>Tanyakan seputar dokumen RKS, persyaratan CSMS, atau alur konversi PDF ke Word.</p><div className="quick-actions">{quickActions.map(({ icon: Icon, color, title, description, prompt: suggestion }) => <button key={title} className="quick-card" onClick={() => submitMessage(suggestion)}><span className={`quick-icon ${color}`}><Icon size={20} /></span><strong>{title}</strong><small>{description}</small><ArrowRight className="quick-arrow" size={17} /></button>)}</div><div className="sample-label">ATAU COBA TANYAKAN</div><button className="suggestion" onClick={() => submitMessage('Apa isi utama RKS overhaul tangki?')}>“Apa isi utama RKS overhaul tangki?” <ArrowRight size={15} /></button></div> : <div className="messages">{active.messages.map((message) => <div key={message.id} className={`message-row ${message.role}`}><div className="message-avatar">{message.role === 'assistant' ? <Sparkles size={17} /> : 'PN'}</div><div className="message-body"><div className="message-meta"><strong>{message.role === 'assistant' ? 'Asisten Pertamina' : 'Anda'}</strong><time>{new Date(message.at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}</time></div>{message.tool && <div className="tool-chip"><Activity size={13} /> {message.tool} <span>DEMO</span></div>}<p>{message.text}</p>{message.role === 'assistant' && <button className="copy-button" onClick={() => copyResponse(message.text)}><Copy size={14} /> Salin jawaban</button>}</div></div>)}{busy && <div className="message-row assistant"><div className="message-avatar"><Sparkles size={17} /></div><div className="thinking"><span /><span /><span /></div></div>}<div ref={bottomRef} /></div>}</div>
-          <form className="composer-wrap" onSubmit={(event) => { event.preventDefault(); submitMessage() }}><div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitMessage() } }} placeholder="Tanyakan tentang dokumen RKS atau proses pengadaan..." rows={2} aria-label="Pesan untuk asisten" /><div className="composer-bottom"><span><Sparkles size={14} /> Asisten dokumen pengadaan</span><button type="submit" disabled={!prompt.trim() || busy} aria-label="Kirim pesan"><Send size={18} /></button></div></div><p>Respons pada template ini adalah simulasi. Verifikasi informasi dengan dokumen resmi.</p></form>
+          <div className="chat-scroll">{active.messages.length === 0 ? <div className="empty-chat"><div className="assistant-orbit"><div className="orbit-inner"><Sparkles size={27} /></div></div><div className="welcome-kicker">SELAMAT DATANG</div><h2>Halo, ada yang bisa<br /><em>saya bantu?</em></h2><p>Tanyakan seputar dokumen RKS, persyaratan CSMS, atau alur konversi PDF ke Word.</p><div className="quick-actions">{quickActions.map(({ icon: Icon, color, title, description, prompt: suggestion }) => <button key={title} className="quick-card" onClick={() => submitMessage(suggestion)}><span className={`quick-icon ${color}`}><Icon size={20} /></span><strong>{title}</strong><small>{description}</small><ArrowRight className="quick-arrow" size={17} /></button>)}</div><div className="sample-label">ATAU COBA TANYAKAN</div><button className="suggestion" onClick={() => submitMessage('Apa isi utama RKS overhaul tangki?')}>“Apa isi utama RKS overhaul tangki?” <ArrowRight size={15} /></button></div> : <div className="messages">{active.messages.map((message) => <div key={message.id} className={`message-row ${message.role}`}><div className="message-avatar">{message.role === 'assistant' ? <Sparkles size={17} /> : 'PN'}</div><div className="message-body"><div className="message-meta"><strong>{message.role === 'assistant' ? 'Asisten Pertamina' : 'Anda'}</strong><time>{new Date(message.at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}</time></div>{message.tool && <div className="tool-chip"><Activity size={13} /> {message.tool} <span>{message.source === 'api' ? 'API' : 'DEMO'}</span></div>}<p>{message.text}</p>{message.role === 'assistant' && <button className="copy-button" onClick={() => copyResponse(message.text)}><Copy size={14} /> Salin jawaban</button>}</div></div>)}{busy && <div className="message-row assistant"><div className="message-avatar"><Sparkles size={17} /></div><div className="thinking"><span /><span /><span /></div></div>}<div ref={bottomRef} /></div>}</div>
+          <form className="composer-wrap" onSubmit={(event) => { event.preventDefault(); submitMessage() }}><div className="composer"><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitMessage() } }} placeholder="Tanyakan tentang dokumen RKS atau proses pengadaan..." rows={2} aria-label="Pesan untuk asisten" /><div className="composer-bottom"><span><Sparkles size={14} /> Asisten dokumen pengadaan</span><button type="submit" disabled={!prompt.trim() || busy} aria-label="Kirim pesan"><Send size={18} /></button></div></div><p>{mode === 'live' ? 'Jawaban berasal dari agent. Verifikasi informasi dengan dokumen resmi.' : 'Respons pada template ini adalah simulasi. Verifikasi informasi dengan dokumen resmi.'}</p></form>
         </section>
 
         {viewerOpen && <>
           <button className="viewer-backdrop" type="button" aria-label="Tutup pratinjau dokumen" onClick={() => setViewerOpen(false)} />
           <button className="viewer-close-button" type="button" aria-label="Tutup pratinjau dokumen" title="Tutup pratinjau" onClick={() => setViewerOpen(false)}><X size={19} /></button>
         </>}
-        {viewerOpen && <section className="viewer-panel" aria-label="Pratinjau dokumen"><div className="viewer-heading"><div><div className="viewer-heading-icon"><FileText size={19} /></div><div><strong>Pratinjau dokumen</strong><small>Telusuri isi dan detail dokumen</small></div></div><span className="viewer-badge">LIVE PREVIEW</span></div>{active.document ? <><div className="document-info"><div className="document-symbol"><FileText size={22} /></div><div><span>DOKUMEN TERBUKA</span><h3>{active.document.title}</h3><p>{active.document.filename}</p></div></div><div className="document-tags"><span><FileCheck2 size={13} /> {active.document.number}</span><span className="risk-tag">CSMS: {active.document.category}</span><span>{active.document.chapters.length} Bab</span></div><div className="doc-tabs" role="tablist" aria-label="Tampilan dokumen"><button role="tab" aria-selected={docTab === 'preview'} className={docTab === 'preview' ? 'active' : ''} onClick={() => setDocTab('preview')}><BookOpenText size={16} /> Isi dokumen</button><button role="tab" aria-selected={docTab === 'outline'} className={docTab === 'outline' ? 'active' : ''} onClick={() => setDocTab('outline')}><Layers3 size={16} /> Daftar bab</button><button role="tab" aria-selected={docTab === 'convert'} className={docTab === 'convert' ? 'active' : ''} onClick={() => setDocTab('convert')}><Download size={16} /> Konversi</button></div><div className="document-body">{docTab === 'preview' && <div className="paper"><div className="paper-header"><div className="paper-brand"><div className="mini-mark"><i /><i /><i /></div> PERTAMINA</div><span>CONTOH DOKUMEN</span></div><div className="paper-rule" /><p className="paper-overline">RENCANA KERJA DAN SYARAT-SYARAT</p><h2>{active.document.title}</h2><div className="paper-meta"><span>Nomor dokumen</span><strong>{active.document.number}</strong><span>Kategori risiko</span><strong>{active.document.category}</strong></div><hr /><h4>BAB 01 — PENDAHULUAN</h4><p>Dokumen contoh ini memperlihatkan bagaimana isi RKS akan ditampilkan setelah data dari backend tersedia. Bagian ini bukan isi dokumen resmi.</p><h4>1.1 Latar Belakang</h4><p>Pekerjaan overhaul tangki memerlukan persyaratan teknis, administrasi, dan keselamatan yang terdokumentasi secara jelas untuk mendukung proses pengadaan.</p><h4>1.2 Maksud dan Tujuan</h4><p>Menetapkan ruang lingkup dan standar pelaksanaan pekerjaan sesuai dokumen sumber yang akan disediakan melalui layanan backend.</p></div>}{docTab === 'outline' && <div className="outline-list"><div className="outline-intro">STRUKTUR DOKUMEN <span>{active.document.chapters.length} BAB</span></div>{active.document.chapters.map((chapter) => <div className="outline-chapter" key={chapter.no}><div className="outline-number">{chapter.no}</div><div><strong>BAB {chapter.no} — {chapter.title}</strong>{chapter.sections.map((section, index) => <p key={section}>{Number(chapter.no)}.{index + 1} {section}</p>)}</div></div>)}</div>}{docTab === 'convert' && <div className="convert-card"><div className="convert-icon"><ArrowDownToLine size={24} /></div><h3>PDF ke Word, lebih mudah</h3><p>Alur konversi mempertahankan struktur dokumen asli. Fungsi unduhan akan tersedia setelah API backend terhubung.</p><div className="convert-file"><FileText size={21} /><div><strong>{active.document.filename}</strong><small>Dokumen sumber · PDF</small></div><Check size={17} /></div><button className="primary-button" onClick={() => setConvertOpen(true)}><FileCheck2 size={17} /> Lihat alur konversi</button></div>}</div><div className="viewer-footer"><FileClock size={15} /> Konten demo untuk pratinjau antarmuka</div></> : <div className="viewer-empty"><div className="viewer-empty-icon"><FileSearch size={32} /></div><div className="empty-dots"><span /><span /><span /></div><h3>Belum ada dokumen dibuka</h3><p>Minta asisten mencari dokumen RKS. Hasilnya akan muncul di panel ini agar mudah ditinjau.</p><button onClick={() => submitMessage('Tolong ambilkan dokumen full RKS untuk overhaul tangki')}>Coba cari dokumen <ArrowRight size={16} /></button><div className="viewer-empty-foot"><BookOpenText size={16} /> Preview · Daftar bab · Konversi</div></div>}</section>}
+        {viewerOpen && <DocumentPanel document={active.document} tab={docTab} setTab={setDocTab} mode={mode} onConvert={() => setConvertOpen(true)} onSearch={() => submitMessage('Tolong ambilkan dokumen full RKS untuk overhaul tangki')} />}
       </div>
       <footer className="page-footer"><span>© 2026 Pertamina Patra Niaga · Template antarmuka</span><span>Built for a smarter procurement workflow <span className="footer-star">✦</span></span></footer>
     </div>
 
-    {convertOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setConvertOpen(false) }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close icon-button" aria-label="Tutup dialog" onClick={() => setConvertOpen(false)}><X size={19} /></button><div className="modal-icon"><FileCheck2 size={25} /></div><h2 id="modal-title">Konversi PDF ke DOCX</h2><p>Alur ini siap dihubungkan ke layanan konversi pada backend.</p><label>File sumber<div className="modal-source"><FileText size={18} /> {active.document?.filename || 'Belum ada dokumen'}</div></label><label>Nama file keluaran<input value={active.document?.filename?.replace(/\.pdf$/i, '.docx') || ''} readOnly /></label><div className="modal-note"><CircleHelp size={17} /> Mode pratinjau belum menghasilkan file. Tombol unduh akan tersedia setelah API konversi aktif.</div><div className="modal-actions"><button className="outline-button" onClick={() => setConvertOpen(false)}>Tutup</button><button className="primary-button" disabled><Download size={16} /> Konversi & unduh</button></div></div></div>}
+    {convertOpen && <ConversionDialog document={active.document} mode={mode} result={conversion} converting={converting} onClose={() => setConvertOpen(false)} onConvert={runConversion} />}
     {notice && <div className="toast" role="status"><Check size={16} /> {notice}<button aria-label="Tutup pesan" onClick={() => setNotice('')}><X size={14} /></button></div>}
   </div>
 }

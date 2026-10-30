@@ -1,6 +1,6 @@
 # Template React — Pertamina Document Assistant
 
-Template antarmuka untuk branch `integrasi-fe`. Kontennya adalah data demo lokal. Fitur chat AI, pencarian RKS, PDF asli, dan konversi DOCX belum terhubung ke backend.
+Antarmuka React untuk `integrasi-fe`. Tanpa backend, aplikasi tetap terbuka dalam mode demo. Jika API `integrasi-be` berjalan, frontend memakai jawaban agent, dokumen RKS, dan konversi DOCX dari backend.
 
 ## Menjalankan
 
@@ -10,13 +10,13 @@ npm install
 npm run dev
 ```
 
-Buka alamat lokal yang dicetak Vite. Untuk membuat versi produksi, jalankan `npm run build`.
+Buka alamat lokal yang dicetak Vite. Vite meneruskan permintaan `/api` ke `http://127.0.0.1:8000`, sehingga browser cukup memakai satu origin frontend. Untuk membuat versi produksi, jalankan `npm run build`; saat deployment, `/api` harus diarahkan ke backend.
 
 ## Cakupan template
 
-- Chat dan riwayat sesi tersimpan di `localStorage` browser.
-- Contoh pertanyaan menampilkan jawaban dan dokumen demo.
-- Panel dokumen memiliki tab isi, daftar bab, dan konversi.
-- Tombol konversi menunjukkan status menunggu API dan tidak membuat file palsu.
+- Tanpa backend: contoh pertanyaan menampilkan jawaban dan dokumen demo. Konversi tidak menghasilkan file palsu.
+- Dengan backend: tombol status di kanan atas menampilkan koneksi; chat memakai API dan viewer menampilkan isi dokumen asli.
+- Konversi DOCX aktif bila PDF sumber ditemukan backend. File yang selesai dapat diunduh melalui URL unduhan dari API.
+- Tampilan riwayat tetap disimpan di `localStorage`. Sesi agent di backend masih berada dalam memori dan akan dibuat ulang jika server dimulai ulang.
 
-Saat backend tersedia, ganti fungsi `createDemoResponse` di `src/App.jsx` dengan panggilan API untuk chat dan pemuatan dokumen. Dialog konversi perlu dihubungkan ke endpoint konversi dan unduhan DOCX. Berkas Python/Streamlit di root proyek tidak diubah oleh template ini.
+Backend berada di branch `integrasi-be`, yang bisa dijalankan dari checkout/worktree terpisah. Backend belum digabung ke branch ini. Berkas Python/Streamlit di root `integrasi-fe` tidak diubah.

@@ -223,6 +223,11 @@ body, .main-area { background: #fff; }
 .message-body p { background: none; font-size: 12px; line-height: 1.8; padding: 0; color: #3e4d59; }
 .message-row.user .message-body p { background: #f5f6f7; border-radius: 12px; padding: 10px 14px; }
 .tool-chip { background: #f5f9fb; border-color: #e6eff4; }
+.tool-chip span { display: none; }
+.paper-source-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; line-height: 1.8; color: #526575; }
+.source-pdf-link { display: inline-flex; align-items: center; gap: 7px; margin-top: 20px; color: var(--pn-red); font-size: 10px; font-weight: 700; text-decoration: none; }
+.source-pdf-link:hover { text-decoration: underline; }
+.modal-actions .primary-button { text-decoration: none; }
 .composer-wrap {
   width: min(calc(100% - 42px), 760px);
   margin: 0 auto;
