@@ -102,12 +102,12 @@ def create_app() -> FastAPI:
             raise ApiError(422, "invalid_message", "Pesan tidak boleh kosong.")
         thread = state.get_thread_record(thread_id)
         with thread.run_lock:
-            state.add_message(thread_id, "user", prompt)
             answer, tool_events, payload = agent.run(thread_id, prompt)
             document_id = None
             if payload:
                 detail, source_pdf = documents.from_agent_payload(payload)
                 document_id = state.add_document(thread_id, detail, source_pdf)
+            state.add_message(thread_id, "user", prompt)
             message = state.add_message(thread_id, "assistant", answer, document_id)
         return ChatResponse(
             thread_id=thread_id,
