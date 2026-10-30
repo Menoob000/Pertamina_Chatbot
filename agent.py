@@ -16,7 +16,7 @@ from langchain_tavily import TavilySearch
 from langchain_core.tools import tool
 from rag.vector_store import fetch_full_document, fetch_relevant_documents
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
-from tools.docx_exporter import render_to_docx, parse_text_to_rks_data
+from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata
 
 load_dotenv()
 
@@ -37,68 +37,61 @@ def fetch_full_documents(query : str) -> Dict[str, Any]:
 return_full_docs = fetch_full_documents
 
 @tool
-def export_to_docx(state: Annotated[dict, InjectedState], output_filename: str = "", title: str = "") -> str:
-    """Exports the last document fetched by 'fetch_full_documents' into a formatted Word (.docx) document.
-    Use this tool when the user asks to export, download, or save the document as Word / DOCX / docs format.
-    The tool automatically retrieves the last document fetched by 'fetch_full_documents' from the conversation history.
+def convert_pdf_to_docx(state: Annotated[dict, InjectedState], target_pdf_name: str = "", output_filename: str = "") -> str:
+    """Converts a database/retrieved PDF document directly into an editable Microsoft Word (.docx) file preserving the visual layout.
+    Use this tool when the user asks to convert, export, or turn a PDF into a DOCX / Word file.
+    The tool automatically locates the matching PDF in the database/repository.
     """
-    doc_content = ""
-    doc_title = title
+    matched_pdf = None
 
-    # 1. Inspect previous messages specifically for the last document fetched by fetch_full_documents / return_full_docs
-    messages = state.get("messages", [])
-    for msg in reversed(messages):
-        if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in ("fetch_full_documents", "return_full_docs", "fetch_full_document"):
-            content = msg.content
-            if isinstance(content, dict):
-                if "full_docs" in content:
-                    doc_content = content["full_docs"]
-                if not doc_title and "title" in content:
-                    doc_title = content["title"]
-                if doc_content:
-                    break
-            elif isinstance(content, str) and content:
-                if "'full_docs':" in content or '"full_docs":' in content:
-                    try:
-                        import ast
-                        parsed_dict = ast.literal_eval(content)
-                        if isinstance(parsed_dict, dict):
-                            if "full_docs" in parsed_dict:
-                                doc_content = parsed_dict["full_docs"]
-                            if not doc_title and "title" in parsed_dict:
-                                doc_title = parsed_dict["title"]
-                            if doc_content:
-                                break
-                    except Exception:
-                        pass
-                doc_content = content
-                break
+    # 1. If user or agent explicitly supplied a target pdf name or query
+    if target_pdf_name:
+        matched_pdf = find_matching_pdf(target_pdf_name)
 
-    # 2. Check if state has full_docs as fallback
-    if not doc_content and state.get("full_docs"):
-        doc_content = state["full_docs"]
+    # 2. If not found or empty, search conversation state for the last retrieved document title/file
+    if not matched_pdf:
+        messages = state.get("messages", [])
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in ("fetch_full_documents", "return_full_docs", "fetch_relevant_documents"):
+                content = msg.content
+                cand_title = ""
+                if isinstance(content, dict):
+                    cand_title = content.get("title") or content.get("source_file", "")
+                elif isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+                    cand_title = content[0].get("title", "")
+                elif isinstance(content, str):
+                    match = re.search(r"([A-Za-z0-9_\-\.\+]+\.pdf)", content)
+                    if match:
+                        cand_title = match.group(1)
+                
+                if cand_title:
+                    matched_pdf = find_matching_pdf(cand_title)
+                    if matched_pdf:
+                        break
 
-    if not doc_content:
+    if not matched_pdf:
         return (
-            "Error: No document has been fetched yet using 'fetch_full_documents'. "
-            "Please fetch the document first using 'fetch_full_documents' before calling this tool."
+            "Error: Could not locate the target PDF file to convert in the repository. "
+            "Please ensure the document has been fetched first using 'fetch_full_documents' or provide the exact PDF filename."
         )
 
-    # 3. Parse the fetched document into RKS structure and render
-    rks_data = parse_text_to_rks_data(doc_content, custom_title=doc_title)
-
+    # 3. Perform direct layout conversion
     try:
-        saved_path = render_to_docx(draft_data=rks_data, output_filename=output_filename)
-        filename = os.path.basename(saved_path)
+        output_path = convert_pdf_to_docx_layout(matched_pdf, output_filename=output_filename)
+        meta = get_pdf_metadata(matched_pdf)
+        filename = os.path.basename(output_path)
         return (
-            f"Document successfully exported to DOCX format!\n"
-            f"- Title: {doc_title or rks_data['cover_page']['judul_pekerjaan']}\n"
-            f"- File: {filename}\n"
-            f"- Path: {saved_path}\n"
-            f"The document is ready for download."
+            f"Successfully converted PDF to DOCX with direct layout preservation!\n"
+            f"- Source PDF: {meta.get('file_name')} ({meta.get('page_count')} pages)\n"
+            f"- Converted Word Document: {filename}\n"
+            f"- Path: {output_path}\n"
+            f"The converted DOCX is now ready for download."
         )
     except Exception as e:
-        return f"Failed to export document to DOCX: {str(e)}"
+        return f"Failed to convert PDF to DOCX: {str(e)}"
+
+# Alias so legacy prompts/calls for export_to_docx still trigger this tool
+export_to_docx = convert_pdf_to_docx
 
 
 class AgentState(TypedDict):
@@ -106,7 +99,7 @@ class AgentState(TypedDict):
     full_docs : str
 
 
-tools = [search_tool, fetch_full_documents, fetch_relevant_documents, export_to_docx]
+tools = [search_tool, fetch_full_documents, fetch_relevant_documents, convert_pdf_to_docx]
 
 llm = ChatOpenRouter(model=config.LLM_MODEL_NAME, api_key=os.environ.get('OPENROUTER_API_KEY'))
 llm_with_tools = llm.bind_tools(tools)
@@ -117,12 +110,13 @@ def agent_node(state: AgentState) -> dict:
         content=(
             "You are an intelligent knowledge base assistant for Pertamina.\n"
             "You have access to the following tools:\n"
-            "1. 'fetch_full_documents': Use this when the user asks for a document or RKS template. Returns the document text and its title.\n"
+            "1. 'fetch_full_documents': Always use this tool first when the user asks to generate a Document. Returns the document text and its title.\n"
             "2. 'search_tool': Use this when you need live internet information.\n"
             "3. 'fetch_relevant_documents': Use this tool when the user asks specific questions about documents. Returns relevant snippets with their document titles.\n"
-            "4. 'export_to_docx': Use this tool when the user asks to export, download, or convert the document to Word / DOCX / docs format. It renders the last document fetched by 'fetch_full_documents'.\n\n"
-            "IMPORTANT CITATION RULE:\n"
-            "Whenever you answer using information retrieved from 'fetch_full_documents' or 'fetch_relevant_documents', always cite and display the document's Title (e.g. '📄 Dokumen: <title>') prominently at the beginning or in your response so the user clearly sees which document was consulted."
+            "4. 'convert_pdf_to_docx': Use this tool when the user asks to convert, export, or turn a PDF into Word / DOCX format. It directly converts the original PDF layout into an editable DOCX file.\n\n"
+            "IMPORTANT CITATION & CONVERSION RULES:\n"
+            "- Whenever you answer using information retrieved from 'fetch_full_documents' or 'fetch_relevant_documents', cite and display the document's Title (e.g. '📄 Dokumen: <title>').\n"
+            "- When the user asks to convert the document to Word/DOCX, invoke 'convert_pdf_to_docx'."
         )
     )
     

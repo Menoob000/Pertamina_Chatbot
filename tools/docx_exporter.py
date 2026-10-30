@@ -706,13 +706,17 @@ def render_to_docx(draft_data: dict, output_filename: str = "") -> str:
     return str(output_path.resolve())
 
 
+# ──────────────────────────────────────────────────────────────
+# Text & Database Parser to RKS Data Structure
+# ──────────────────────────────────────────────────────────────
 import re
+from datetime import datetime
 
 def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
-    """Parses raw text, markdown, or JSON into the structured dict expected by render_to_docx."""
-    text = (text or "").strip()
+    """Parses text extracted from database/PDF into structured dict expected by render_to_docx."""
+    text = (text or "").replace("\xa0", " ").replace("\r\n", "\n").strip()
 
-    # 1. Check if raw text is JSON or fenced JSON
+    # 1. JSON check
     if "```json" in text:
         try:
             raw = text.split("```json")[1].split("```")[0].strip()
@@ -729,37 +733,58 @@ def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
         except Exception:
             pass
 
-    # 2. Extract Title
+    # 2. Extract Title / Job Description
     title = custom_title
-    if not title:
-        first_line = text.splitlines()[0].strip("# ").strip() if text else "RKS Document"
-        title = first_line.replace("RENCANA KERJA DAN SYARAT-SYARAT", "").replace("(RKS)", "").strip(" -:")
-        if not title:
-            title = "PEKERJAAN PERTAMINA"
+    clean_custom = custom_title.replace(".pdf", "").replace("RKS-", "").replace("RKS+", "").strip() if custom_title else ""
 
-    # Extract CSMS
+    # Check for MELAKSANAKAN PEKERJAAN ... pattern in text
+    job_match = re.search(r'(?:MELAKSANAKAN\s+PEKERJAAN|PEKERJAAN)\s+([A-Z0-9\s\-\.\/\,\_]+?)(?:PARAF|LAMPIRAN|DAFTAR|PT KILANG|\n\n)', text, re.IGNORECASE)
+    if job_match:
+        extracted_job = job_match.group(0).strip()
+        extracted_job = re.sub(r'\s+', ' ', extracted_job)
+        if 15 < len(extracted_job) < 250:
+            title = extracted_job
+
+    if not title:
+        title = clean_custom or "RENCANA KERJA DAN SYARAT-SYARAT (RKS)"
+
+    # 3. Extract Company Name
+    company_match = re.search(r'(PT\s+KILANG\s+PERTAMINA\s+INTERNASIONAL[^\n\r]+|PT\s+PERTAMINA\s*\([^\)]+\))', text, re.IGNORECASE)
+    company_name = re.sub(r'\s+', ' ', company_match.group(1).strip()) if company_match else "PT PERTAMINA (PERSERO)"
+
+    # 4. Extract CSMS Risk Level
     csms = "HIGH"
-    if re.search(r"csms.*?(middle|sedang)", text, re.IGNORECASE):
+    if re.search(r'csms.*?(middle|sedang)', text, re.IGNORECASE):
         csms = "MIDDLE"
-    elif re.search(r"csms.*?(low|rendah)", text, re.IGNORECASE):
+    elif re.search(r'csms.*?(low|rendah)', text, re.IGNORECASE):
         csms = "LOW"
 
-    # Extract chapters (BAB)
-    bab_pattern = re.compile(r"^(?:#+\s*)?(?:BAB\s+([0-9IVXLCDM]+)[\s:\-]+(.*))$", re.MULTILINE | re.IGNORECASE)
-    matches = list(bab_pattern.finditer(text))
+    # 5. Extract Chapters / Sections
+    section_pattern = re.compile(
+        r'^(?:(?:BAB|PASAL)\s+([0-9IVXLCDM]+)|([IVXLCDM]+)\.|\b([0-9]+)\.)\s+([A-Z][A-Z0-9\s\(\)\/\,\.\-\+\&]{3,})$',
+        re.MULTILINE
+    )
+    all_matches = list(section_pattern.finditer(text))
+    valid_matches = []
+    for m in all_matches:
+        sec_title = m.group(4).strip()
+        # Skip table of contents dot-lines (e.g. ................)
+        if '...' in sec_title or 'Hal.' in sec_title or 'Page ' in sec_title:
+            continue
+        valid_matches.append(m)
 
     bab_list = []
-    if matches:
-        for idx, match in enumerate(matches):
-            nomor = match.group(1).strip()
-            judul = match.group(2).strip()
-            start = match.end()
-            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-            chapter_text = text[start:end].strip()
+    if valid_matches:
+        for idx, match in enumerate(valid_matches):
+            num = match.group(1) or match.group(2) or match.group(3)
+            sec_title = match.group(4).strip()
+            start_pos = match.end()
+            end_pos = valid_matches[idx + 1].start() if idx + 1 < len(valid_matches) else len(text)
+            sec_text = text[start_pos:end_pos].strip()
 
-            # Split sub-bab inside chapter
-            sub_pattern = re.compile(r"^(?:#+\s*)?([0-9]+(?:\.[0-9]+)+|\b[A-Z]\.)\s+(.*)$", re.MULTILINE)
-            sub_matches = list(sub_pattern.finditer(chapter_text))
+            # Split sub-sections within chapter
+            sub_pattern = re.compile(r'^(?:#+\s*)?([0-9]+(?:\.[0-9]+)+|\b[a-z]\.|\b[A-Z]\.)\s+(.*)$', re.MULTILINE)
+            sub_matches = list(sub_pattern.finditer(sec_text))
 
             sub_babs = []
             if sub_matches:
@@ -767,173 +792,62 @@ def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
                     s_no = s_match.group(1).strip()
                     s_title = s_match.group(2).strip()
                     s_start = s_match.end()
-                    s_end = sub_matches[s_idx + 1].start() if s_idx + 1 < len(sub_matches) else len(chapter_text)
-                    content = chapter_text[s_start:s_end].strip()
+                    s_end = sub_matches[s_idx + 1].start() if s_idx + 1 < len(sub_matches) else len(sec_text)
+                    content_str = sec_text[s_start:s_end].strip()
 
                     sub_babs.append({
                         "nomor": s_no,
                         "judul": s_title,
                         "tipe": "paragraf",
-                        "konten": content
+                        "konten": content_str
                     })
             else:
                 sub_babs.append({
-                    "nomor": f"{nomor}.1",
-                    "judul": "Uraian",
+                    "nomor": f"{num}.1",
+                    "judul": "Uraian Teknis",
                     "tipe": "paragraf",
-                    "konten": chapter_text
+                    "konten": sec_text
                 })
 
             bab_list.append({
-                "nomor": nomor,
-                "judul": judul,
+                "nomor": str(num),
+                "judul": sec_title,
                 "sub_bab": sub_babs
             })
     else:
-        # Default single BAB
+        # Fallback single BAB
         bab_list.append({
             "nomor": "1",
             "judul": "URAIAN PEKERJAAN",
             "sub_bab": [
                 {
                     "nomor": "1.1",
-                    "judul": "Lingkup Pekerjaan",
+                    "judul": "Lingkup Kerja",
                     "tipe": "paragraf",
                     "konten": text
                 }
             ]
         })
 
-    return {
-        "cover_page": {
-            "judul_pekerjaan": title,
-            "resiko_csms": csms,
-            "nama_perusahaan": "PT PERTAMINA (PERSERO)"
-        },
-        "pengesahan": {
-            "disusun_oleh": {"nama": "", "jabatan": "Fungsi Terkait"},
-            "diperiksa_oleh": {"nama": "", "jabatan": "Fungsi Pengadaan"},
-            "disetujui_oleh": {"nama": "", "jabatan": "Pejabat Berwenang"}
-        },
-        "metadata": {
-            "nomor_dokumen": "RKS/PERTAMINA/2026"
-        },
-        "bab": bab_list
-    }
-
-
-import re
-
-def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
-    """Parses raw text, markdown, or JSON into the structured dict expected by render_to_docx."""
-    text = (text or "").strip()
-
-    # 1. Check if raw text is JSON or fenced JSON
-    if "```json" in text:
-        try:
-            raw = text.split("```json")[1].split("```")[0].strip()
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-    elif text.startswith("{") and text.endswith("}"):
-        try:
-            data = json.loads(text)
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-
-    # 2. Extract Title
-    title = custom_title
-    if not title:
-        first_line = text.splitlines()[0].strip("# ").strip() if text else "RKS Document"
-        title = first_line.replace("RENCANA KERJA DAN SYARAT-SYARAT", "").replace("(RKS)", "").strip(" -:")
-        if not title:
-            title = "PEKERJAAN PERTAMINA"
-
-    # Extract CSMS
-    csms = "HIGH"
-    if re.search(r"csms.*?(middle|sedang)", text, re.IGNORECASE):
-        csms = "MIDDLE"
-    elif re.search(r"csms.*?(low|rendah)", text, re.IGNORECASE):
-        csms = "LOW"
-
-    # Extract chapters (BAB)
-    bab_pattern = re.compile(r"^(?:#+\s*)?(?:BAB\s+([0-9IVXLCDM]+)[\s:\-]+(.*))$", re.MULTILINE | re.IGNORECASE)
-    matches = list(bab_pattern.finditer(text))
-
-    bab_list = []
-    if matches:
-        for idx, match in enumerate(matches):
-            nomor = match.group(1).strip()
-            judul = match.group(2).strip()
-            start = match.end()
-            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-            chapter_text = text[start:end].strip()
-
-            # Split sub-bab inside chapter
-            sub_pattern = re.compile(r"^(?:#+\s*)?([0-9]+(?:\.[0-9]+)+|\b[A-Z]\.)\s+(.*)$", re.MULTILINE)
-            sub_matches = list(sub_pattern.finditer(chapter_text))
-
-            sub_babs = []
-            if sub_matches:
-                for s_idx, s_match in enumerate(sub_matches):
-                    s_no = s_match.group(1).strip()
-                    s_title = s_match.group(2).strip()
-                    s_start = s_match.end()
-                    s_end = sub_matches[s_idx + 1].start() if s_idx + 1 < len(sub_matches) else len(chapter_text)
-                    content = chapter_text[s_start:s_end].strip()
-
-                    sub_babs.append({
-                        "nomor": s_no,
-                        "judul": s_title,
-                        "tipe": "paragraf",
-                        "konten": content
-                    })
-            else:
-                sub_babs.append({
-                    "nomor": f"{nomor}.1",
-                    "judul": "Uraian",
-                    "tipe": "paragraf",
-                    "konten": chapter_text
-                })
-
-            bab_list.append({
-                "nomor": nomor,
-                "judul": judul,
-                "sub_bab": sub_babs
-            })
-    else:
-        # Default single BAB
-        bab_list.append({
-            "nomor": "1",
-            "judul": "URAIAN PEKERJAAN",
-            "sub_bab": [
-                {
-                    "nomor": "1.1",
-                    "judul": "Lingkup Pekerjaan",
-                    "tipe": "paragraf",
-                    "konten": text
-                }
-            ]
-        })
+    # Doc number
+    doc_no = "RKS/PERTAMINA/" + datetime.now().strftime("%Y")
+    doc_no_match = re.search(r'No\.?\s*Dok(?:umen)?[\s\:]+([A-Za-z0-9\-\.\/\_]+)', text, re.IGNORECASE)
+    if doc_no_match:
+        doc_no = doc_no_match.group(1).strip()
 
     return {
         "cover_page": {
             "judul_pekerjaan": title,
             "resiko_csms": csms,
-            "nama_perusahaan": "PT PERTAMINA (PERSERO)"
+            "nama_perusahaan": company_name
         },
         "pengesahan": {
-            "disusun_oleh": {"nama": "", "jabatan": "Fungsi Terkait"},
-            "diperiksa_oleh": {"nama": "", "jabatan": "Fungsi Pengadaan"},
+            "disusun_oleh": {"nama": "", "jabatan": "Fungsi Terkait / User"},
+            "diperiksa_oleh": {"nama": "", "jabatan": "Fungsi Pengadaan / Procurement"},
             "disetujui_oleh": {"nama": "", "jabatan": "Pejabat Berwenang"}
         },
         "metadata": {
-            "nomor_dokumen": "RKS/PERTAMINA/2026"
+            "nomor_dokumen": doc_no
         },
         "bab": bab_list
     }
-    return str(output_path.resolve())

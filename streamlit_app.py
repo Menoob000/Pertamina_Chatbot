@@ -9,7 +9,8 @@ from typing import Optional, Dict, Any, List
 import streamlit as st
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from agent import app, tools
-from tools.docx_exporter import parse_text_to_rks_data, render_to_docx
+from tools.docx_exporter import parse_text_to_rks_data
+from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
 
 # ---------------------------------------------------------------------------
 # Page Configuration & Professional Theming
@@ -21,7 +22,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom Corporate CSS: White background, Pertamina Blue (#0072CE) & Pertamina Red (#ED1C24)
 st.markdown(
     """
     <style>
@@ -31,7 +31,6 @@ st.markdown(
         font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
-    /* Clean white background and sleek framing */
     .stApp {
         background-color: #FFFFFF;
         color: #0F172A;
@@ -91,7 +90,7 @@ st.markdown(
         border: 1px solid #E2E8F0;
     }
 
-    /* ChatGPT-style Message Layout */
+    /* Messages */
     .stChatMessage {
         border-radius: 12px !important;
         margin-bottom: 0.8rem !important;
@@ -140,7 +139,7 @@ st.markdown(
         margin: 4px 0;
     }
 
-    /* Split-Screen Document Paper Viewer */
+    /* Document Viewer */
     .doc-viewer-container {
         background: #FFFFFF;
         border: 1px solid #E2E8F0;
@@ -189,7 +188,7 @@ st.markdown(
         margin-right: 6px;
     }
     .doc-paper-body {
-        max-height: 65vh;
+        max-height: 62vh;
         overflow-y: auto;
         padding-right: 0.5rem;
         font-size: 0.9rem;
@@ -197,7 +196,6 @@ st.markdown(
         color: #1E293B;
     }
 
-    /* Empty state */
     .doc-empty-state {
         text-align: center;
         padding: 4rem 1.5rem;
@@ -207,7 +205,6 @@ st.markdown(
         background-color: #FAFAFA;
     }
 
-    /* Download Card */
     .download-card {
         display: flex;
         align-items: center;
@@ -236,7 +233,6 @@ st.markdown(
         color: #64748B;
     }
 
-    /* Hero welcome */
     .hero-container {
         text-align: center;
         padding: 2rem 1rem 1.5rem 1rem;
@@ -304,6 +300,9 @@ def init_session_state():
     if "show_split_viewer" not in st.session_state:
         st.session_state.show_split_viewer = True
 
+    if "dialog_converted_file" not in st.session_state:
+        st.session_state.dialog_converted_file = None
+
 init_session_state()
 
 current_thread_id = st.session_state.current_thread_id
@@ -351,7 +350,7 @@ def extract_docx_path(text: str) -> Optional[str]:
         if os.path.exists(cand):
             return cand
 
-    match_file = re.search(r'([a-zA-Z0-9_\-\.\s]+\.docx)', text)
+    match_file = re.search(r'([a-zA-Z0-9_\-\.\+\s]+\.docx)', text)
     if match_file:
         cand_name = match_file.group(1).strip()
         local_cand = os.path.join("output", cand_name)
@@ -362,7 +361,7 @@ def extract_docx_path(text: str) -> Optional[str]:
 
 
 def get_current_thread_document(thread_id: str) -> Optional[Dict[str, Any]]:
-    """Retrieves the latest document fetched by fetch_full_documents or generated in this thread along with its title."""
+    """Retrieves the latest document fetched by fetch_full_documents or generated in this thread along with its title and original PDF path."""
     messages = get_thread_messages(thread_id)
     for msg in reversed(messages):
         # 1. Check ToolMessage from fetch_full_documents / return_full_docs
@@ -390,11 +389,14 @@ def get_current_thread_document(thread_id: str) -> Optional[Dict[str, Any]]:
                     doc_str = content
 
             if doc_str and len(doc_str.strip()) > 20:
+                clean_title = doc_title or source_file or "Fetched RKS Document"
+                pdf_path = find_matching_pdf(clean_title)
                 return {
                     "source": "fetch_full_documents",
                     "content": doc_str,
-                    "title": doc_title or source_file or "Fetched RKS Document",
+                    "title": clean_title,
                     "source_file": source_file,
+                    "pdf_path": pdf_path,
                 }
 
         # 2. Check AIMessage containing substantial RKS structure
@@ -405,12 +407,13 @@ def get_current_thread_document(thread_id: str) -> Optional[Dict[str, Any]]:
                     "content": msg.content,
                     "title": "Generated RKS Draft",
                     "source_file": "",
+                    "pdf_path": None,
                 }
     return None
 
 
 def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
-    """Nicely formats and displays RAG tool outputs to highlight document titles."""
+    """Nicely formats and displays RAG and Conversion tool outputs."""
     content = raw_content
     if isinstance(content, str):
         if content.startswith("{") or content.startswith("["):
@@ -424,7 +427,7 @@ def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
         st.markdown(f"<div class='doc-title-badge'>📄 Document Title: <strong>{title}</strong></div>", unsafe_allow_html=True)
         full_text = content.get("full_docs", "")
         st.caption(f"Fetched full content ({len(full_text)} characters). Preview below:")
-        st.text(full_text[:600] + ("..." if len(full_text) > 600 else ""))
+        st.text(full_text[:500] + ("..." if len(full_text) > 500 else ""))
         return
 
     if tc_name == "fetch_relevant_documents" and isinstance(content, list):
@@ -433,17 +436,15 @@ def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
             if isinstance(item, dict):
                 t = item.get("title") or item.get("document_title", "Unknown Document")
                 score = item.get("relevance_score") or item.get("score", "N/A")
-                snippet = str(item.get("content", ""))[:220]
+                snippet = str(item.get("content", ""))[:200]
                 st.markdown(f"{idx}. <span class='doc-title-badge'>📄 {t}</span> <span style='font-size:0.75rem; color:#64748B;'>Score: {score}</span>", unsafe_allow_html=True)
                 st.caption(f"> {snippet}...")
-            elif isinstance(item, tuple) and len(item) == 2:
-                doc, score = item
-                t = getattr(doc, "metadata", {}).get("file_name", "Unknown Document")
-                st.markdown(f"{idx}. <span class='doc-title-badge'>📄 {t}</span> <span style='font-size:0.75rem; color:#64748B;'>Score: {round(float(score), 3)}</span>", unsafe_allow_html=True)
-                st.caption(f"> {doc.page_content[:220]}...")
         return
 
-    # Default fallback
+    if tc_name in ("convert_pdf_to_docx", "export_to_docx"):
+        st.success(str(raw_content))
+        return
+
     st.text(str(raw_content)[:800])
 
 
@@ -460,7 +461,7 @@ def render_docx_download_card(file_path: str, key: str):
             <div class="download-card">
                 <div class="download-info">
                     <span class="download-title">📄 {fname}</span>
-                    <span class="download-sub">Pertamina RKS DOCX • {file_size_kb:.1f} KB</span>
+                    <span class="download-sub">Converted Word DOCX • {file_size_kb:.1f} KB</span>
                 </div>
             </div>
             """,
@@ -475,6 +476,62 @@ def render_docx_download_card(file_path: str, key: str):
             type="primary",
             use_container_width=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Requirement 3: Streamlit Modal Popup for PDF -> DOCX Conversion
+# ---------------------------------------------------------------------------
+@st.dialog("🔄 Convert PDF to Word (DOCX)")
+def open_pdf_converter_dialog(pdf_path: str, doc_title: str):
+    """Modal popup dialog that converts a retrieved database PDF directly to DOCX with layout preservation."""
+    st.markdown(f"#### 📄 **{doc_title}**")
+
+    if not pdf_path or not os.path.exists(pdf_path):
+        st.error(f"Source PDF file could not be found on disk for '{doc_title}'.")
+        return
+
+    meta = get_pdf_metadata(pdf_path)
+
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        st.metric("Total Pages", f"{meta.get('page_count', 1)} pages")
+    with col_m2:
+        st.metric("Original Size", f"{meta.get('file_size_kb', 0)} KB")
+
+    st.write("")
+    st.info("ℹ️ **Direct Layout Engine:** Converts tables, graphics, headers, and original formatting directly into Microsoft Word (.docx).")
+
+    suggested_docx_name = f"{Path(pdf_path).stem}.docx"
+    custom_name = st.text_input("Output Filename", value=suggested_docx_name, key="dialog_output_filename_input")
+
+    col_btn1, col_btn2 = st.columns([1, 1])
+    with col_btn1:
+        if st.button("🚀 Start Conversion", type="primary", use_container_width=True, key="btn_run_dialog_conversion"):
+            with st.spinner(f"Converting {meta.get('page_count', 1)} pages into Word layout..."):
+                try:
+                    res_path = convert_pdf_to_docx_layout(pdf_path, output_filename=custom_name)
+                    st.session_state.dialog_converted_file = res_path
+                    st.success(f"✅ Conversion successful! Saved to: `{os.path.basename(res_path)}`")
+                except Exception as e:
+                    st.error(f"Conversion failed: {e}")
+
+    # If converted, show the instant download button inside modal
+    if st.session_state.dialog_converted_file and os.path.exists(st.session_state.dialog_converted_file):
+        out_fpath = st.session_state.dialog_converted_file
+        out_fname = os.path.basename(out_fpath)
+        out_size = os.path.getsize(out_fpath) / 1024
+        st.divider()
+        st.markdown(f"**🎉 Ready for download:** `{out_fname}` ({out_size:.1f} KB)")
+        with open(out_fpath, "rb") as df:
+            st.download_button(
+                label=f"📥 Download {out_fname}",
+                data=df.read(),
+                file_name=out_fname,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="btn_download_from_dialog",
+                type="primary",
+                use_container_width=True,
+            )
 
 
 AVATAR_ASSISTANT = "assets/logo_pertamina.png" if os.path.exists("assets/logo_pertamina.png") else "🤖"
@@ -533,6 +590,16 @@ with st.sidebar:
                 st.session_state.current_thread_id = list(st.session_state.threads.keys())[0]
                 st.rerun()
 
+    # Database PDF Converter Shortcut in Sidebar
+    all_repo_pdfs = list(DATA_DIR.glob("*.pdf")) if DATA_DIR.exists() else []
+    if all_repo_pdfs:
+        with st.expander("🔄 Convert Any Repository PDF", expanded=False):
+            st.caption("Select any PDF from the repository database to convert via popup dialog:")
+            pdf_options = {p.name: str(p.resolve()) for p in all_repo_pdfs}
+            selected_pdf_name = st.selectbox("Choose PDF", list(pdf_options.keys()), key="sidebar_pdf_selector")
+            if st.button("Open Conversion Popup", key="btn_open_sidebar_dialog", use_container_width=True):
+                open_pdf_converter_dialog(pdf_options[selected_pdf_name], selected_pdf_name)
+
     # Agent Tools Section
     st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Agent Capabilities</p>", unsafe_allow_html=True)
 
@@ -553,8 +620,8 @@ with st.sidebar:
         for t in tools:
             t_name = getattr(t, "name", str(t))
             t_desc = getattr(t, "description", "")
-            is_export = "docx" in t_name
-            badge_class = "tool-badge-red" if is_export else "tool-badge-blue"
+            is_convert = "convert" in t_name or "docx" in t_name
+            badge_class = "tool-badge-red" if is_convert else "tool-badge-blue"
             st.markdown(
                 f"<div style='margin-bottom:6px;'>"
                 f"<span class='{badge_class}'>● {t_name}</span><br>"
@@ -568,7 +635,7 @@ with st.sidebar:
     if output_dir.exists():
         docx_files = sorted(list(output_dir.glob("*.docx")), key=os.path.getmtime, reverse=True)
         if docx_files:
-            with st.expander(f"📁 Exported Documents ({len(docx_files)})", expanded=True):
+            with st.expander(f"📁 Converted Documents ({len(docx_files)})", expanded=True):
                 for f_idx, docx_file in enumerate(docx_files[:4]):
                     f_name = docx_file.name
                     f_size = docx_file.stat().st_size / 1024
@@ -587,7 +654,10 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Main Header & Split-Screen View Controls
 # ---------------------------------------------------------------------------
-top_col1, top_col2 = st.columns([3, 1])
+thread_messages = get_thread_messages(current_thread_id)
+current_doc_data = get_current_thread_document(current_thread_id)
+
+top_col1, top_col2, top_col3 = st.columns([3, 1, 1])
 with top_col1:
     st.markdown(
         f"""
@@ -599,16 +669,17 @@ with top_col1:
         unsafe_allow_html=True,
     )
 with top_col2:
+    # Popup Button in Topbar when an RKS document is loaded
+    if current_doc_data and current_doc_data.get("pdf_path"):
+        if st.button("🔄 Convert PDF", key="top_convert_popup_btn", type="primary", use_container_width=True):
+            open_pdf_converter_dialog(current_doc_data["pdf_path"], current_doc_data["title"])
+with top_col3:
     split_label = "📖 Hide Viewer" if st.session_state.show_split_viewer else "📖 Split Viewer"
     if st.button(split_label, key="toggle_split_viewer", use_container_width=True):
         st.session_state.show_split_viewer = not st.session_state.show_split_viewer
         st.rerun()
 
 st.write("")
-
-# Fetch historical messages for the current thread from LangGraph MemorySaver
-thread_messages = get_thread_messages(current_thread_id)
-current_doc_data = get_current_thread_document(current_thread_id)
 
 # ---------------------------------------------------------------------------
 # Layout: Split-Screen (Chat Left | Document Viewer Right)
@@ -633,7 +704,7 @@ with chat_col:
                 </div>
                 <div class="hero-title">Pertamina Document Assistant</div>
                 <div class="hero-sub">
-                    Retrieve official RKS document templates, inspect them live with exact document titles, and export formatted DOCX files.
+                    Retrieve official RKS document templates, inspect them in the split viewer, and convert original PDFs directly into Word (.docx) with preserved layout.
                 </div>
             </div>
             """,
@@ -650,8 +721,8 @@ with chat_col:
                 st.session_state.prefilled_prompt = "Apa saja persyaratan aspek CSMS untuk kategori High?"
                 st.rerun()
         with col3:
-            if st.button("📥 **Export DOCX**\n\nExport RKS terakhir ke DOCX", key="starter_docx", use_container_width=True):
-                st.session_state.prefilled_prompt = "Export dokumen RKS terakhir ke format docx"
+            if st.button("🔄 **Convert PDF**\n\nConvert PDF RKS terakhir ke DOCX", key="starter_docx", use_container_width=True):
+                st.session_state.prefilled_prompt = "Convert dokumen PDF RKS terakhir ke docx format"
                 st.rerun()
 
         st.write("")
@@ -686,8 +757,8 @@ with chat_col:
                             matching_tool_msg = candidate
                             break
 
-                    is_export = "docx" in tc_name
-                    badge_type = "tool-badge-red" if is_export else "tool-badge-blue"
+                    is_convert = "convert" in tc_name or "docx" in tc_name
+                    badge_type = "tool-badge-red" if is_convert else "tool-badge-blue"
 
                     with st.chat_message("assistant", avatar=AVATAR_ASSISTANT):
                         with st.status(f"⚙️ Tool: {tc_name}", state="complete", expanded=False):
@@ -746,7 +817,7 @@ if doc_col:
                     <span style="font-size:2.4rem;">📑</span>
                     <h4 style="margin-top:10px; margin-bottom:6px; color:#334155;">No Document Loaded</h4>
                     <p style="font-size:0.85rem; max-width:340px; margin:0 auto; line-height:1.4;">
-                        Ask the assistant to fetch an RKS (e.g. <em>"Ambilkan RKS overhaul tangki"</em>) to inspect its full content and document title here.
+                        Ask the assistant to fetch an RKS (e.g. <em>"Ambilkan RKS overhaul tangki"</em>) to inspect its full content and convert its original PDF.
                     </p>
                 </div>
                 """,
@@ -756,6 +827,7 @@ if doc_col:
             doc_raw = current_doc_data["content"]
             rag_doc_title = current_doc_data.get("title", "")
             source_file = current_doc_data.get("source_file", "")
+            pdf_path = current_doc_data.get("pdf_path")
 
             parsed_rks = parse_text_to_rks_data(doc_raw, custom_title=rag_doc_title)
             display_title = rag_doc_title or parsed_rks.get("cover_page", {}).get("judul_pekerjaan", "DOKUMEN RKS")
@@ -782,7 +854,7 @@ if doc_col:
             )
 
             # Document Viewer Tabs
-            tab_preview, tab_outline, tab_export = st.tabs(["📖 Document Text", "📑 Chapter Outline", "⚡ Quick Actions"])
+            tab_preview, tab_outline, tab_convert = st.tabs(["📖 Document Text", "📑 Chapter Outline", "⚡ Convert PDF to DOCX"])
 
             with tab_preview:
                 st.markdown(
@@ -809,24 +881,19 @@ if doc_col:
                 else:
                     st.caption("No chapters identified in the text.")
 
-            with tab_export:
-                st.markdown("#### Document Export Options")
-                st.caption(f"Export '{display_title}' into standard Pertamina DOCX format.")
+            with tab_convert:
+                st.markdown("#### Direct PDF to DOCX Conversion")
+                st.caption("Converts the original PDF file directly into Word format preserving tables, formatting, and layout.")
 
-                col_exp1, col_exp2 = st.columns(2)
-                with col_exp1:
-                    if st.button("📤 Export Document Now", key="btn_quick_export_doc", type="primary", use_container_width=True):
-                        try:
-                            saved_file = render_to_docx(parsed_rks)
-                            st.session_state.last_quick_export = saved_file
-                            st.success(f"Generated: {os.path.basename(saved_file)}")
-                            st.rerun()
-                        except Exception as ex:
-                            st.error(f"Failed to export: {ex}")
+                if pdf_path and os.path.exists(pdf_path):
+                    p_meta = get_pdf_metadata(pdf_path)
+                    st.write(f"**Source File:** `{p_meta.get('file_name')}` ({p_meta.get('page_count')} pages, {p_meta.get('file_size_kb')} KB)")
 
-                with col_exp2:
-                    if "last_quick_export" in st.session_state and os.path.exists(st.session_state.last_quick_export):
-                        render_docx_download_card(st.session_state.last_quick_export, key="viewer_quick_dl_btn")
+                    # Popup Modal Trigger Button
+                    if st.button("🚀 Open Conversion Popup", key="btn_trigger_pdf_popup", type="primary", use_container_width=True):
+                        open_pdf_converter_dialog(pdf_path, display_title)
+                else:
+                    st.warning("Original PDF file was not found in `./data/` for this document.")
 
 
 # ---------------------------------------------------------------------------
@@ -837,7 +904,7 @@ if initial_input:
     user_prompt = initial_input
     st.session_state.prefilled_prompt = None
 else:
-    user_prompt = st.chat_input("Ask a question, fetch an RKS, or export to DOCX...")
+    user_prompt = st.chat_input("Ask a question, fetch an RKS, or convert PDF to DOCX...")
 
 if user_prompt:
     with chat_col:
@@ -870,8 +937,8 @@ if user_prompt:
                                     tool_args = tc.get("args", {})
 
                                     st.session_state.active_tool_now = tool_name
-                                    is_export = "docx" in tool_name
-                                    badge_label = "Export Action" if is_export else "Retrieval Action"
+                                    is_convert = "convert" in tool_name or "docx" in tool_name
+                                    badge_label = "PDF Conversion" if is_convert else "Retrieval Action"
 
                                     with st.status(f"⚙️ Running `{tool_name}` ({badge_label})...", expanded=True) as status_box:
                                         st.write("**Parameters:**")
@@ -895,7 +962,6 @@ if user_prompt:
                         tool_msgs = tool_output.get("messages", [])
                         for tm in tool_msgs:
                             tm_content = tm.content
-                            # Check if fetch_full_documents or fetch_relevant_documents
                             if tm.name == "fetch_full_documents" and isinstance(tm_content, dict):
                                 fetched_title = tm_content.get("title", "Untitled Document")
                                 st.success(f"📄 **Document Fetched:** `{fetched_title}`")
@@ -903,6 +969,8 @@ if user_prompt:
                                 titles = list({item.get("title") for item in tm_content if isinstance(item, dict) and item.get("title")})
                                 if titles:
                                     st.info(f"🔍 **Matched Documents:** {', '.join([f'`{t}`' for t in titles])}")
+                            elif tm.name in ("convert_pdf_to_docx", "export_to_docx"):
+                                st.success(f"✅ **PDF Converted to DOCX:** {str(tm_content)[:250]}")
                             else:
                                 preview = str(tm_content)[:250] + ("..." if len(str(tm_content)) > 250 else "")
                                 st.info(f"✅ **Tool `{tm.name}` completed:** {preview}")
