@@ -9,7 +9,8 @@ from typing import Optional, Dict, Any, List
 import streamlit as st
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from agent import app, tools
-from tools.docx_exporter import parse_text_to_rks_data
+from tools.docx_exporter import parse_text_to_rks_data, render_to_docx
+import psycopg
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
 
 # ---------------------------------------------------------------------------
@@ -482,38 +483,54 @@ def render_docx_download_card(file_path: str, key: str):
 # Requirement 3: Streamlit Modal Popup for PDF -> DOCX Conversion
 # ---------------------------------------------------------------------------
 @st.dialog("🔄 Convert PDF to Word (DOCX)")
-def open_pdf_converter_dialog(pdf_path: str, doc_title: str):
-    """Modal popup dialog that converts a retrieved database PDF directly to DOCX with layout preservation."""
+def open_pdf_converter_dialog(doc_title: str, doc_content: str = "", pdf_path: str = ""):
+    """Modal popup dialog that converts a retrieved database document directly to a professional Pertamina DOCX."""
     st.markdown(f"#### 📄 **{doc_title}**")
 
-    if not pdf_path or not os.path.exists(pdf_path):
-        st.error(f"Source PDF file could not be found on disk for '{doc_title}'.")
-        return
-
-    meta = get_pdf_metadata(pdf_path)
+    # If doc_content is empty, try fetching from PostgreSQL
+    if not doc_content:
+        try:
+            with psycopg.connect("dbname=langchain user=langchain password=langchain host=127.0.0.1 connect_timeout=5") as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT full_content FROM documents WHERE title ILIKE %s LIMIT 1;",
+                        (f"%{doc_title}%",)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        doc_content = row[0]
+        except Exception:
+            pass
 
     col_m1, col_m2 = st.columns(2)
     with col_m1:
-        st.metric("Total Pages", f"{meta.get('page_count', 1)} pages")
+        content_len = len(doc_content) if doc_content else 0
+        st.metric("Document Size", f"{content_len:,} chars")
     with col_m2:
-        st.metric("Original Size", f"{meta.get('file_size_kb', 0)} KB")
+        st.metric("Format", "Pertamina RKS DOCX")
 
     st.write("")
-    st.info("ℹ️ **Direct Layout Engine:** Converts tables, graphics, headers, and original formatting directly into Microsoft Word (.docx).")
+    st.info("ℹ️ **Pertamina Corporate DOCX Engine:** Generates official cover page, lembar pengesahan, daftar isi, and structured chapters.")
 
-    suggested_docx_name = f"{Path(pdf_path).stem}.docx"
+    clean_stem = doc_title.replace(".pdf", "").replace("RKS-", "").strip()
+    suggested_docx_name = f"RKS_{clean_stem[:40]}.docx"
     custom_name = st.text_input("Output Filename", value=suggested_docx_name, key="dialog_output_filename_input")
 
-    col_btn1, col_btn2 = st.columns([1, 1])
-    with col_btn1:
-        if st.button("🚀 Start Conversion", type="primary", use_container_width=True, key="btn_run_dialog_conversion"):
-            with st.spinner(f"Converting {meta.get('page_count', 1)} pages into Word layout..."):
-                try:
+    if st.button("🚀 Start Conversion", type="primary", use_container_width=True, key="btn_run_dialog_conversion"):
+        with st.spinner("Generating formatted Pertamina DOCX..."):
+            try:
+                if doc_content:
+                    rks_data = parse_text_to_rks_data(doc_content, custom_title=doc_title)
+                    res_path = render_to_docx(rks_data, output_filename=custom_name)
+                elif pdf_path and os.path.exists(pdf_path):
                     res_path = convert_pdf_to_docx_layout(pdf_path, output_filename=custom_name)
-                    st.session_state.dialog_converted_file = res_path
-                    st.success(f"✅ Conversion successful! Saved to: `{os.path.basename(res_path)}`")
-                except Exception as e:
-                    st.error(f"Conversion failed: {e}")
+                else:
+                    raise ValueError("Content not found in database or disk for this document.")
+
+                st.session_state.dialog_converted_file = res_path
+                st.success(f"✅ Conversion successful! Saved to: `{os.path.basename(res_path)}`")
+            except Exception as e:
+                st.error(f"Conversion failed: {e}")
 
     # If converted, show the instant download button inside modal
     if st.session_state.dialog_converted_file and os.path.exists(st.session_state.dialog_converted_file):
@@ -598,7 +615,7 @@ with st.sidebar:
             pdf_options = {p.name: str(p.resolve()) for p in all_repo_pdfs}
             selected_pdf_name = st.selectbox("Choose PDF", list(pdf_options.keys()), key="sidebar_pdf_selector")
             if st.button("Open Conversion Popup", key="btn_open_sidebar_dialog", use_container_width=True):
-                open_pdf_converter_dialog(pdf_options[selected_pdf_name], selected_pdf_name)
+                open_pdf_converter_dialog(doc_title=selected_pdf_name, pdf_path=pdf_options[selected_pdf_name])
 
     # Agent Tools Section
     st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Agent Capabilities</p>", unsafe_allow_html=True)
@@ -672,7 +689,7 @@ with top_col2:
     # Popup Button in Topbar when an RKS document is loaded
     if current_doc_data and current_doc_data.get("pdf_path"):
         if st.button("🔄 Convert PDF", key="top_convert_popup_btn", type="primary", use_container_width=True):
-            open_pdf_converter_dialog(current_doc_data["pdf_path"], current_doc_data["title"])
+            open_pdf_converter_dialog(doc_title=current_doc_data["title"], doc_content=current_doc_data.get("content", ""), pdf_path=current_doc_data.get("pdf_path", ""))
 with top_col3:
     split_label = "📖 Hide Viewer" if st.session_state.show_split_viewer else "📖 Split Viewer"
     if st.button(split_label, key="toggle_split_viewer", use_container_width=True):
@@ -882,18 +899,36 @@ if doc_col:
                     st.caption("No chapters identified in the text.")
 
             with tab_convert:
-                st.markdown("#### Direct PDF to DOCX Conversion")
-                st.caption("Converts the original PDF file directly into Word format preserving tables, formatting, and layout.")
+                st.markdown("#### 📄 Export Document to Word (.docx)")
+                st.caption("Converts the loaded database document into a professional Pertamina RKS Word file with official cover page, approval sheet, table of contents, and chapters.")
 
-                if pdf_path and os.path.exists(pdf_path):
-                    p_meta = get_pdf_metadata(pdf_path)
-                    st.write(f"**Source File:** `{p_meta.get('file_name')}` ({p_meta.get('page_count')} pages, {p_meta.get('file_size_kb')} KB)")
+                default_fname = f"{display_title.replace('.pdf', '')}.docx"
+                col_c1, col_c2 = st.columns([2, 1])
+                with col_c1:
+                    custom_doc_name = st.text_input("DOCX Filename", value=default_fname, key="tab_convert_fname_input")
+                with col_c2:
+                    st.write("")
+                    st.write("")
+                    btn_run_tab_convert = st.button("🚀 Convert to Word", key="btn_run_tab_convert", type="primary", use_container_width=True)
 
-                    # Popup Modal Trigger Button
-                    if st.button("🚀 Open Conversion Popup", key="btn_trigger_pdf_popup", type="primary", use_container_width=True):
-                        open_pdf_converter_dialog(pdf_path, display_title)
-                else:
-                    st.warning("Original PDF file was not found in `./data/` for this document.")
+                if btn_run_tab_convert:
+                    with st.spinner("Generating formatted Pertamina DOCX document..."):
+                        try:
+                            rks_parsed = parse_text_to_rks_data(doc_raw, custom_title=display_title)
+                            saved_docx = render_to_docx(rks_parsed, output_filename=custom_doc_name)
+                            st.session_state[f"tab_converted_{display_title}"] = saved_docx
+                            st.success(f"✅ Successfully converted! Saved to `{os.path.basename(saved_docx)}`")
+                        except Exception as e:
+                            st.error(f"Conversion failed: {e}")
+
+                # Show download button if converted
+                active_converted = st.session_state.get(f"tab_converted_{display_title}")
+                if active_converted and os.path.exists(active_converted):
+                    render_docx_download_card(active_converted, key=f"tab_download_btn_{abs(hash(display_title))}")
+
+                st.divider()
+                if st.button("🔄 Open Modal Dialog Popup", key="btn_trigger_pdf_popup", use_container_width=True):
+                    open_pdf_converter_dialog(doc_title=display_title, doc_content=doc_raw, pdf_path=pdf_path or "")
 
 
 # ---------------------------------------------------------------------------
