@@ -15,7 +15,7 @@ embeddings = OpenAIEmbeddings(
             openai_api_base="https://openrouter.ai/api/v1",
             tiktoken_enabled=False,
             )
-connection = "postgresql+psycopg://langchain:langchain@localhost:5432/langchain"  # Uses psycopg3!
+connection = "postgresql+psycopg://langchain:langchain@127.0.0.1:5432/langchain"  # Uses psycopg3!
 vector_store = PGVector(
     embeddings=embeddings,
     collection_name="knowledge_base",
@@ -51,7 +51,7 @@ def fetch_full_document(user_query: str) -> Dict[str, Any]:
         }
 
     # 4. Fetch title & full text from SQL database
-    connection_string = "dbname=langchain user=langchain password=langchain host=localhost"
+    connection_string = "dbname=langchain user=langchain password=langchain host=127.0.0.1"
     
     try:
         with psycopg.connect(connection_string) as conn:

@@ -333,7 +333,12 @@ def _render_approval_sheet(doc: Document, draft_data: dict, config: dict):
         cell_name = table.cell(row_idx, 1)
         nama = data.get("nama", "") or ""
         jabatan = data.get("jabatan", "") or ""
-        name_text = f"\n\n\n{nama}\n{jabatan}" if nama else f"\n\n\n{'_' * 20}\n({'_' * 20})"
+        if nama and jabatan:
+            name_text = f"\n\n\n{nama}\n{jabatan}"
+        elif jabatan:
+            name_text = f"\n\n\n( {'_' * 24} )\n{jabatan}"
+        else:
+            name_text = f"\n\n\n( {'_' * 24} )\nPejabat Berwenang"
         cell_name.text = name_text
         cell_name.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         for run in cell_name.paragraphs[0].runs:
@@ -538,15 +543,93 @@ def _render_content(doc: Document, draft_data: dict, config: dict):
 
 
 def _render_paragraph(doc: Document, text, font_name: str, font_size: int, line_spacing: float):
-    """Render paragraph content."""
+    """Render paragraph content with smart detection for bullets, numbered items, and markdown tables."""
     if isinstance(text, list):
         text = "\n".join(text)
-    para = doc.add_paragraph()
-    para.paragraph_format.line_spacing = line_spacing
-    para.paragraph_format.space_after = Pt(6)
-    run = para.add_run(str(text))
-    run.font.name = font_name
-    run.font.size = Pt(font_size)
+    raw_str = str(text or "").strip()
+    if not raw_str:
+        return
+
+    lines = [ln.rstrip() for ln in raw_str.split("\n")]
+    i = 0
+    total_lines = len(lines)
+
+    while i < total_lines:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        # Check for Markdown/Pipe Table
+        if line.startswith("|") and line.endswith("|") and i + 1 < total_lines and "|" in lines[i + 1]:
+            table_lines = []
+            while i < total_lines and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+            
+            # Parse table lines
+            rows = []
+            for t_line in table_lines:
+                # Skip separator rows like |---|---|
+                if re.match(r'^\|[\s\-\:\|]+\|$', t_line):
+                    continue
+                cells = [c.strip() for c in t_line.strip("|").split("|")]
+                rows.append(cells)
+            
+            if rows:
+                headers = rows[0]
+                data_rows = rows[1:] if len(rows) > 1 else []
+                _render_table(doc, {"headers": headers, "rows": data_rows}, font_name)
+            continue
+
+        # Check for Bullet List (e.g. -, *, •, –)
+        bullet_match = re.match(r'^[\-\*•–]\s+(.*)$', line)
+        if bullet_match:
+            item_text = bullet_match.group(1).strip()
+            p = doc.add_paragraph(item_text, style='List Bullet')
+            p.paragraph_format.space_after = Pt(3)
+            p.paragraph_format.line_spacing = line_spacing
+            for run in p.runs:
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+            i += 1
+            continue
+
+        # Check for Numbered List Item (e.g. 1., 2., a., b., 1), a) )
+        num_match = re.match(r'^(?:(\d+|[a-zA-Z])[\.\)]|[0-9]+(?:\.[0-9]+)+)\s+(.*)$', line)
+        if num_match:
+            item_text = line
+            p = doc.add_paragraph(item_text)
+            p.paragraph_format.left_indent = Cm(0.75)
+            p.paragraph_format.space_after = Pt(3)
+            p.paragraph_format.line_spacing = line_spacing
+            for run in p.runs:
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+            i += 1
+            continue
+
+        # Normal Paragraph: gather contiguous normal lines
+        para_lines = [line]
+        i += 1
+        while i < total_lines:
+            next_line = lines[i].strip()
+            if not next_line:
+                break
+            if next_line.startswith("|") and next_line.endswith("|"):
+                break
+            if re.match(r'^[\-\*•–]\s+', next_line) or re.match(r'^(?:(\d+|[a-zA-Z])[\.\)]|[0-9]+(?:\.[0-9]+)+)\s+', next_line):
+                break
+            para_lines.append(next_line)
+            i += 1
+
+        combined_text = " ".join(para_lines)
+        p = doc.add_paragraph()
+        p.paragraph_format.line_spacing = line_spacing
+        p.paragraph_format.space_after = Pt(6)
+        run = p.add_run(combined_text)
+        run.font.name = font_name
+        run.font.size = Pt(font_size)
 
 
 def _render_list(doc: Document, items, font_name: str, font_size: int, numbered: bool = True):
@@ -726,12 +809,23 @@ def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
         except Exception:
             pass
     elif text.startswith("{") and text.endswith("}"):
+        data = None
         try:
             data = json.loads(text)
-            if isinstance(data, dict):
-                return data
         except Exception:
-            pass
+            try:
+                import ast
+                data = ast.literal_eval(text)
+            except Exception:
+                data = None
+
+        if isinstance(data, dict):
+            if "full_docs" in data or "full_content" in data:
+                text = (data.get("full_docs") or data.get("full_content") or "").replace("\xa0", " ").replace("\r\n", "\n").strip()
+                if not custom_title:
+                    custom_title = data.get("title", "")
+            elif "bab" in data:
+                return data
 
     # 2. Extract Title / Job Description
     title = custom_title
@@ -760,27 +854,34 @@ def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
         csms = "LOW"
 
     # 5. Extract Chapters / Sections
+    # Use horizontal spaces [ \t] so titles cannot bleed across line breaks
     section_pattern = re.compile(
-        r'^(?:(?:BAB|PASAL)\s+([0-9IVXLCDM]+)|([IVXLCDM]+)\.|\b([0-9]+)\.)\s+([A-Z][A-Z0-9\s\(\)\/\,\.\-\+\&]{3,})$',
+        r'^(?:(?:BAB|PASAL)[ \t]+([0-9IVXLCDM]+(?:\s+[A-Z]{1,3})?)|([IVXLCDM]{1,7})\.|([0-9]{1,3})\.)[ \t]+'
+        r'([A-Z][A-Z0-9 \(\)\/\,\.\-\+\&]{2,79})$',
         re.MULTILINE
     )
     all_matches = list(section_pattern.finditer(text))
     valid_matches = []
     for m in all_matches:
         sec_title = m.group(4).strip()
-        # Skip table of contents dot-lines (e.g. ................)
-        if '...' in sec_title or 'Hal.' in sec_title or 'Page ' in sec_title:
+        # Skip table of contents dot-lines, page references, and signature labels
+        if '...' in sec_title or re.search(r'\bHal\b|\bPage\b|\bHalaman\b|\bPARAF\b|\bTANDA TANGAN\b', sec_title, re.IGNORECASE):
+            continue
+        if len(sec_title) < 4:
             continue
         valid_matches.append(m)
 
     bab_list = []
     if valid_matches:
         for idx, match in enumerate(valid_matches):
-            num = match.group(1) or match.group(2) or match.group(3)
+            raw_num = (match.group(1) or match.group(2) or match.group(3) or "").strip()
             sec_title = match.group(4).strip()
             start_pos = match.end()
             end_pos = valid_matches[idx + 1].start() if idx + 1 < len(valid_matches) else len(text)
             sec_text = text[start_pos:end_pos].strip()
+
+            # Sequential chapter display: use raw_num if distinct or sequential index
+            chap_num = str(idx + 1) if raw_num.isdigit() else raw_num
 
             # Split sub-sections within chapter
             sub_pattern = re.compile(r'^(?:#+\s*)?([0-9]+(?:\.[0-9]+)+|\b[a-z]\.|\b[A-Z]\.)\s+(.*)$', re.MULTILINE)
@@ -789,7 +890,7 @@ def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
             sub_babs = []
             if sub_matches:
                 for s_idx, s_match in enumerate(sub_matches):
-                    s_no = s_match.group(1).strip()
+                    s_no = s_match.group(1).strip().rstrip('.')
                     s_title = s_match.group(2).strip()
                     s_start = s_match.end()
                     s_end = sub_matches[s_idx + 1].start() if s_idx + 1 < len(sub_matches) else len(sec_text)
@@ -803,14 +904,14 @@ def parse_text_to_rks_data(text: str, custom_title: str = "") -> dict:
                     })
             else:
                 sub_babs.append({
-                    "nomor": f"{num}.1",
+                    "nomor": f"{chap_num}.1",
                     "judul": "Uraian Teknis",
                     "tipe": "paragraf",
                     "konten": sec_text
                 })
 
             bab_list.append({
-                "nomor": str(num),
+                "nomor": chap_num,
                 "judul": sec_title,
                 "sub_bab": sub_babs
             })

@@ -16,7 +16,8 @@ from langchain_tavily import TavilySearch
 from langchain_core.tools import tool
 from rag.vector_store import fetch_full_document, fetch_relevant_documents
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
-from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata
+from tools.docx_exporter import parse_text_to_rks_data, render_to_docx
+import psycopg
 
 load_dotenv()
 
@@ -38,57 +39,79 @@ return_full_docs = fetch_full_documents
 
 @tool
 def convert_pdf_to_docx(state: Annotated[dict, InjectedState], target_pdf_name: str = "", output_filename: str = "") -> str:
-    """Converts a database/retrieved PDF document directly into an editable Microsoft Word (.docx) file preserving the visual layout.
-    Use this tool when the user asks to convert, export, or turn a PDF into a DOCX / Word file.
-    The tool automatically locates the matching PDF in the database/repository.
+    """Converts a database/retrieved RKS document directly into a clean, professionally formatted Microsoft Word (.docx) file with official Pertamina cover page, approval sheet, table of contents, and chapters.
+    Use this tool when the user asks to convert, export, or turn a retrieved document into a DOCX / Word file.
+    Note: The document must already be fetched or viewed in the chat via fetch_full_documents.
     """
-    matched_pdf = None
+    doc_title = ""
+    doc_content = ""
 
-    # 1. If user or agent explicitly supplied a target pdf name or query
-    if target_pdf_name:
-        matched_pdf = find_matching_pdf(target_pdf_name)
+    # 1. Search conversation state for the last retrieved document
+    messages = state.get("messages", [])
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in ("fetch_full_documents", "return_full_docs"):
+            raw_content = msg.content
+            if isinstance(raw_content, str):
+                try:
+                    raw_content = json.loads(raw_content)
+                except Exception:
+                    try:
+                        import ast
+                        raw_content = ast.literal_eval(raw_content)
+                    except Exception:
+                        pass
 
-    # 2. If not found or empty, search conversation state for the last retrieved document title/file
-    if not matched_pdf:
-        messages = state.get("messages", [])
-        for msg in reversed(messages):
-            if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in ("fetch_full_documents", "return_full_docs", "fetch_relevant_documents"):
-                content = msg.content
-                cand_title = ""
-                if isinstance(content, dict):
-                    cand_title = content.get("title") or content.get("source_file", "")
-                elif isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
-                    cand_title = content[0].get("title", "")
-                elif isinstance(content, str):
-                    match = re.search(r"([A-Za-z0-9_\-\.\+]+\.pdf)", content)
-                    if match:
-                        cand_title = match.group(1)
-                
-                if cand_title:
-                    matched_pdf = find_matching_pdf(cand_title)
-                    if matched_pdf:
-                        break
+            if isinstance(raw_content, dict):
+                doc_title = raw_content.get("title") or raw_content.get("source_file", "")
+                doc_content = raw_content.get("full_docs") or raw_content.get("full_content", "")
+                if doc_content:
+                    break
+            elif isinstance(raw_content, str) and len(raw_content) > 100:
+                doc_content = raw_content
+                break
 
-    if not matched_pdf:
+    # 2. If target_pdf_name is provided or doc_content is empty, query PostgreSQL
+    if not doc_content and target_pdf_name:
+        try:
+            with psycopg.connect("dbname=langchain user=langchain password=langchain host=127.0.0.1 connect_timeout=5") as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT title, full_content FROM documents WHERE title ILIKE %s LIMIT 1;",
+                        (f"%{target_pdf_name}%",)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        doc_title, doc_content = row[0], row[1]
+        except Exception:
+            pass
+
+    # 3. If still no document found, return guidance requirement
+    if not doc_content:
         return (
-            "Error: Could not locate the target PDF file to convert in the repository. "
-            "Please ensure the document has been fetched first using 'fetch_full_documents' or provide the exact PDF filename."
+            "Dokumen belum diambil atau ditampilkan di percakapan. "
+            "Silakan minta asisten untuk mengambil dokumen terlebih dahulu (misal: 'Ambilkan RKS...') "
+            "sebelum melakukan konversi ke Word (.docx)."
         )
 
-    # 3. Perform direct layout conversion
+    # 4. Parse structured RKS data and render DOCX
     try:
-        output_path = convert_pdf_to_docx_layout(matched_pdf, output_filename=output_filename)
-        meta = get_pdf_metadata(matched_pdf)
+        rks_data = parse_text_to_rks_data(doc_content, custom_title=doc_title)
+        out_name = output_filename or ""
+        output_path = render_to_docx(rks_data, output_filename=out_name)
         filename = os.path.basename(output_path)
+        final_title = rks_data.get("cover_page", {}).get("judul_pekerjaan", doc_title)
+        num_babs = len(rks_data.get("bab", []))
+
         return (
-            f"Successfully converted PDF to DOCX with direct layout preservation!\n"
-            f"- Source PDF: {meta.get('file_name')} ({meta.get('page_count')} pages)\n"
+            f"Successfully converted document to DOCX format!\n"
+            f"- Title: {final_title}\n"
+            f"- Structured Chapters: {num_babs} BAB\n"
             f"- Converted Word Document: {filename}\n"
             f"- Path: {output_path}\n"
-            f"The converted DOCX is now ready for download."
+            f"The document includes official Pertamina cover page, lembar pengesahan, daftar isi, and structured chapters."
         )
     except Exception as e:
-        return f"Failed to convert PDF to DOCX: {str(e)}"
+        return f"Failed to convert document to DOCX: {str(e)}"
 
 # Alias so legacy prompts/calls for export_to_docx still trigger this tool
 export_to_docx = convert_pdf_to_docx
