@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 import streamlit as st
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from agent import app, tools
+from tools.tender.streamlit_tender_view import render_tender_generator_page
 from tools.docx_exporter import parse_text_to_rks_data
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
 
@@ -550,6 +551,21 @@ with st.sidebar:
     st.caption("AI Document & Knowledge Assistant")
     st.write("")
 
+    # Navigation Switcher
+    nav_selection = st.radio(
+        "Menu Navigasi",
+        ["💬 Chatbot & RKS Viewer", "📑 Dokumen Tender Generator"],
+        index=0 if st.session_state.get("nav_choice") != "tender" else 1,
+        key="app_nav_radio_menu",
+        label_visibility="collapsed"
+    )
+    if "Tender" in nav_selection:
+        st.session_state.nav_choice = "tender"
+    else:
+        st.session_state.nav_choice = "chat"
+
+    st.write("")
+
     if st.button("➕ New Chat", key="btn_create_new_thread", use_container_width=True, type="primary"):
         create_new_thread()
         st.rerun()
@@ -650,6 +666,13 @@ with st.sidebar:
                             use_container_width=True,
                         )
 
+
+# ---------------------------------------------------------------------------
+# Navigation Dispatcher: Tender Generator vs Chatbot & RKS Viewer
+# ---------------------------------------------------------------------------
+if st.session_state.get("nav_choice") == "tender":
+    render_tender_generator_page(render_docx_download_card)
+    st.stop()
 
 # ---------------------------------------------------------------------------
 # Main Header & Split-Screen View Controls
@@ -781,6 +804,7 @@ with chat_col:
                     f_cand = extract_docx_path(msg.content)
                     if f_cand:
                         detected_file_path = f_cand
+                        st.session_state["last_exported_docx"] = f_cand
 
             # Render download card if docx was produced
             if detected_file_path:
@@ -978,6 +1002,7 @@ if user_prompt:
                             f_cand = extract_docx_path(str(tm_content))
                             if f_cand:
                                 generated_docx_path = f_cand
+                                st.session_state["last_exported_docx"] = f_cand
 
                             history = st.session_state.threads[current_thread_id]["tool_history"]
                             if history:
