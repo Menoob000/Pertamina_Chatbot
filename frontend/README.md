@@ -2,6 +2,8 @@
 
 Antarmuka React untuk `integrasi-fe`. Tanpa backend, aplikasi tetap terbuka dalam mode demo. Jika API `integrasi-be` berjalan, frontend memakai jawaban agent, dokumen RKS, dan konversi DOCX dari backend.
 
+Diagram arsitektur dan alur integrasi tersedia di [HLD frontend](docs/HLD.md).
+
 ## Menjalankan
 
 ```bash
