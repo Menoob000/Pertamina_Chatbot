@@ -4,14 +4,24 @@ import psycopg
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_postgres import PGVector
-from langchain_openai import OpenAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
 import config
 from dotenv import load_dotenv
 load_dotenv()
 
+PGVECTOR_HOST = os.getenv("PGVECTOR_HOST", "127.0.0.1")
+PGVECTOR_PORT = int(os.getenv("PGVECTOR_PORT", "5432"))
+PGVECTOR_USER = os.getenv("PGVECTOR_USER", "langchain")
+PGVECTOR_PASSWORD = os.getenv("PGVECTOR_PASSWORD", "langchain")
+PGVECTOR_DB = os.getenv("PGVECTOR_DB", "langchain")
+PGVECTOR_CONNECTION = (
+    f"postgresql+psycopg://{PGVECTOR_USER}:{PGVECTOR_PASSWORD}"
+    f"@{PGVECTOR_HOST}:{PGVECTOR_PORT}/{PGVECTOR_DB}"
+)
 
-def loader(file_path='./data', connection="postgresql+psycopg://langchain:langchain@localhost:5432/langchain"):
+
+def loader(file_path='./data', connection=PGVECTOR_CONNECTION):
     # 1. Load all PDFs from the ./data folder
     print(f"Loading PDFs from {file_path}...")
     loader = PyPDFDirectoryLoader(file_path)
@@ -30,12 +40,7 @@ def loader(file_path='./data', connection="postgresql+psycopg://langchain:langch
         grouped_docs[source_file].append(doc.page_content)
 
     # 2. Setup Embeddings and PGVector Store
-    embeddings = OpenAIEmbeddings(
-            model=config.EMBEDDING_MODEL,
-            openai_api_key=os.getenv('OPENROUTER_API_KEY'),
-            openai_api_base="https://openrouter.ai/api/v1",
-            tiktoken_enabled=False,
-            )
+    embeddings = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL)
     vector_store = PGVector(
         embeddings=embeddings,
         collection_name="knowledge_base",
@@ -45,10 +50,26 @@ def loader(file_path='./data', connection="postgresql+psycopg://langchain:langch
     # 3. Process each document
     text_splitter = SemanticChunker(embeddings=embeddings)
 
-    db_conn = psycopg.connect("postgresql://langchain:langchain@localhost:5432/langchain")
+    db_conn = psycopg.connect(
+        host=PGVECTOR_HOST,
+        port=PGVECTOR_PORT,
+        dbname=PGVECTOR_DB,
+        user=PGVECTOR_USER,
+        password=PGVECTOR_PASSWORD,
+    )
     cursor = db_conn.cursor()
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS documents ("
+        "id UUID PRIMARY KEY, title TEXT NOT NULL, full_content TEXT NOT NULL)"
+    )
+    cursor.execute("SELECT title FROM documents")
+    existing_titles = {row[0] for row in cursor.fetchall()}
 
     for file_name, pages in grouped_docs.items():
+        if file_name in existing_titles:
+            print(f"Skipping already indexed: {file_name}")
+            continue
+
         doc_id = str(uuid.uuid4())
         # Before inserting into PostgreSQL, sanitize NUL bytes
         full_text = "\n".join(pages).replace("\x00", "")
@@ -68,6 +89,7 @@ def loader(file_path='./data', connection="postgresql+psycopg://langchain:langch
         # Add vector embeddings into PGVector store
         vector_store.add_texts(texts=chunks, metadatas=metadatas)
         print(f"Successfully processed: {file_name} (ID: {doc_id})")
+        existing_titles.add(file_name)
 
     db_conn.commit()
     db_conn.close()

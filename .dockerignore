@@ -1,0 +1,13 @@
+.git
+.venv
+.uv-cache
+.uv-python
+.worktrees
+frontend
+data
+output
+.env
+.aws
+.streamlit/secrets.toml
+__pycache__
+*.py[cod]

@@ -17,6 +17,8 @@ from langchain_core.tools import tool
 from rag.vector_store import fetch_full_document, fetch_relevant_documents
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata
+from tools.rks.service import create_document
+import json
 
 load_dotenv()
 
@@ -35,6 +37,16 @@ def fetch_full_documents(query : str) -> Dict[str, Any]:
 
 # Backward compatibility alias
 return_full_docs = fetch_full_documents
+
+
+@tool
+def create_rks_document(query: str, source_id: str = "") -> str:
+    """Create a faithful formatted RKS DOCX and page preview from local knowledge-base PDFs.
+    Use for requests to create/prepare a complete RKS. Never draft its contents in chat.
+    If multiple sources match, returns candidates; ask the user to choose and call again
+    with its source_id. Report the returned status and source without claiming customization.
+    """
+    return json.dumps(create_document(query, source_id), ensure_ascii=False)
 
 @tool
 def convert_pdf_to_docx(state: Annotated[dict, InjectedState], target_pdf_name: str = "", output_filename: str = "") -> str:
@@ -99,7 +111,7 @@ class AgentState(TypedDict):
     full_docs : str
 
 
-tools = [search_tool, fetch_full_documents, fetch_relevant_documents, convert_pdf_to_docx]
+tools = [search_tool, fetch_full_documents, fetch_relevant_documents, convert_pdf_to_docx, create_rks_document]
 
 llm = ChatOpenRouter(model=config.LLM_MODEL_NAME, api_key=os.environ.get('OPENROUTER_API_KEY'))
 llm_with_tools = llm.bind_tools(tools)
@@ -189,7 +201,16 @@ Jika query pengguna ambigu atau informasi di database tidak mencukupi, jelaskan 
     )
     
     # Prepend system prompt to the conversation thread
-    messages = [system_prompt] + state["messages"]
+    rks_policy = SystemMessage(content=(
+        "ATURAN KHUSUS PEMBUATAN RKS: Jika pengguna meminta membuat/menyiapkan dokumen RKS, "
+        "panggil create_rks_document. Aturan ini menggantikan contoh penyusunan RKS dalam prompt sebelumnya. "
+        "Jangan menulis ulang isi RKS di chat dan jangan mengarahkan permintaan ini ke konversi PDF lama. "
+        "Jika status pilih sumber, tampilkan kandidat dan minta satu pilihan; gunakan source_id yang dikembalikan. "
+        "Jika status gagal, jelaskan kegagalan tanpa mengklaim file jadi. Untuk hasil lain, laporkan sumber, "
+        "status dan catatan pemeriksaan apa adanya. Data proyek asal tetap tercantum; bukan penyesuaian proyek baru. "
+        "Preview dan DOCX dibuat oleh tool; jangan membuat tautan file atau isi yang tidak dikembalikan tool."
+    ))
+    messages = [system_prompt, rks_policy] + state["messages"]
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
@@ -222,9 +243,10 @@ builder.add_edge("tools", "agent")
 memory = MemorySaver()
 app = builder.compile(checkpointer=memory)
 
-try:
-    png = app.get_graph().draw_mermaid_png()
-    with open('graph.png', 'wb') as p: 
-        p.write(png)
-except Exception:
-    pass
+if os.getenv("RENDER_AGENT_GRAPH") == "1":
+    try:
+        png = app.get_graph().draw_mermaid_png()
+        with open('graph.png', 'wb') as p:
+            p.write(png)
+    except Exception:
+        pass

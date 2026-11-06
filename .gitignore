@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Frontend dependencies and generated build output
+frontend/node_modules/
+frontend/dist/
+
+# Generated RKS artifacts and office renderer profiles
+output/rks/
+tmp/rks-qa*/

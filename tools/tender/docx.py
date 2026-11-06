@@ -1873,7 +1873,16 @@ def render_tender_to_docx(tender_data: dict, output_filename: str = "") -> str:
         )[:50].strip()
         output_filename = f"Dokumen_Tender_{safe_name}.docx"
 
-    if not output_filename.endswith(".docx"):
+    output_filename = str(output_filename).strip()
+    if (
+        not output_filename
+        or output_filename in {".", ".."}
+        or "/" in output_filename
+        or "\\" in output_filename
+    ):
+        raise ValueError("Nama file keluaran harus berupa nama file tanpa path.")
+
+    if not output_filename.lower().endswith(".docx"):
         output_filename += ".docx"
 
     output_path = OUTPUT_DIR / output_filename

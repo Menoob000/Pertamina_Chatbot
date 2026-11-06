@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from tools.tender.generator import generate_tender_document, export_tender_to_docx, _active_tender_store
 from tools.tender.extractor import extract_rks_info, extract_boq_info
 from tools.tender.docx import OUTPUT_DIR
+from api.rks import router as rks_router
 
 load_dotenv()
 
@@ -29,12 +30,15 @@ app = FastAPI(
     description="Dedicated API service to generate formal Dokumen Tender and Contract Amendments based on Pertamina Procurement Guidelines.",
     version="1.0.0",
 )
+app.include_router(rks_router)
 
 # Enable CORS for Streamlit / Frontend access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # This API does not use cookie-based authentication. Browsers reject
+    # wildcard origins when credentialed requests are enabled.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -139,6 +143,17 @@ def generate_tender(payload: TenderGenerateRequest):
     Generates Dokumen Tender JSON via LLM and renders it into a formal Pertamina DOCX file.
     """
     try:
+        requested_filename = (payload.output_filename or "").strip()
+        if (
+            requested_filename in {".", ".."}
+            or "/" in requested_filename
+            or "\\" in requested_filename
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="output_filename harus berupa nama file tanpa path.",
+            )
+
         # Convert request model to kwargs dictionary
         kwargs = payload.model_dump()
 
@@ -177,8 +192,10 @@ def generate_tender(payload: TenderGenerateRequest):
             }
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/api/tender/download/{filename}")

@@ -1,0 +1,11 @@
+fastapi>=0.141.1
+uvicorn[standard]>=0.53.0
+python-multipart>=0.0.32
+python-dotenv>=0.9.9
+langchain-openai>=1.6.3
+python-docx>=1.2.0
+pymupdf>=1.26.0
+pandas>=2.2.0
+openpyxl>=3.1.0
+xlrd>=2.0.0
+pywin32>=308; sys_platform == 'win32'

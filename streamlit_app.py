@@ -6,10 +6,19 @@ import ast
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+from textwrap import dedent
 import streamlit as st
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-from agent import app, tools
+try:
+    from agent import app, tools
+    AGENT_IMPORT_ERROR = None
+except Exception as exc:
+    # Keep the independent Tender Generator usable when chatbot setup is
+    # incomplete (for example, OPENROUTER_API_KEY is not configured yet).
+    app, tools = None, []
+    AGENT_IMPORT_ERROR = str(exc)
 from tools.tender.streamlit_tender_view import render_tender_generator_page
+from tools.rks.streamlit_view import render_rks_page, render_tool_result
 from tools.docx_exporter import parse_text_to_rks_data
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
 
@@ -24,7 +33,7 @@ st.set_page_config(
 )
 
 st.markdown(
-    """
+    dedent("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
 
@@ -269,7 +278,7 @@ st.markdown(
         border-radius: 16px !important;
     }
     </style>
-    """,
+    """),
     unsafe_allow_html=True,
 )
 
@@ -415,6 +424,13 @@ def get_current_thread_document(thread_id: str) -> Optional[Dict[str, Any]]:
 
 def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
     """Nicely formats and displays RAG and Conversion tool outputs."""
+    if tc_name == "create_rks_document":
+        try:
+            artifact = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+            render_tool_result(artifact, key=f"rks-history-{artifact.get('artifact_id', uuid.uuid4().hex)}")
+        except (ValueError, TypeError):
+            st.text(str(raw_content))
+        return
     content = raw_content
     if isinstance(content, str):
         if content.startswith("{") or content.startswith("["):
@@ -552,6 +568,10 @@ with st.sidebar:
     st.write("")
 
     # Navigation Switcher
+    if st.button("Pembuatan RKS dan preview", key="open_rks_page", use_container_width=True):
+        st.session_state["show_rks_page"] = True
+    if st.session_state.get("show_rks_page") and st.button("Kembali ke chat / tender", key="close_rks_page"):
+        st.session_state["show_rks_page"] = False
     nav_selection = st.radio(
         "Menu Navigasi",
         ["💬 Chatbot & RKS Viewer", "📑 Dokumen Tender Generator"],
@@ -670,8 +690,21 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Navigation Dispatcher: Tender Generator vs Chatbot & RKS Viewer
 # ---------------------------------------------------------------------------
+if st.session_state.get("show_rks_page"):
+    render_rks_page()
+    st.stop()
+
 if st.session_state.get("nav_choice") == "tender":
     render_tender_generator_page(render_docx_download_card)
+    st.stop()
+
+if app is None:
+    st.error(
+        "Chatbot belum dapat dimulai karena konfigurasi atau dependensinya belum lengkap. "
+        "Periksa OPENROUTER_API_KEY pada file .env di direktori proyek."
+    )
+    with st.expander("Detail error"):
+        st.code(AGENT_IMPORT_ERROR or "Unknown agent initialization error")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -986,6 +1019,9 @@ if user_prompt:
                         tool_msgs = tool_output.get("messages", [])
                         for tm in tool_msgs:
                             tm_content = tm.content
+                            if tm.name == "create_rks_document":
+                                st.session_state["last_rks_tool_content"] = tm_content
+                                render_tool_result(tm_content, key=f"rks-tool-{tm.id}")
                             if tm.name == "fetch_full_documents" and isinstance(tm_content, dict):
                                 fetched_title = tm_content.get("title", "Untitled Document")
                                 st.success(f"📄 **Document Fetched:** `{fetched_title}`")

@@ -1,5 +1,5 @@
 from langchain_postgres import PGVector
-from langchain_openai import OpenAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 import config
 from langchain_core.tools import tool
 import psycopg
@@ -9,29 +9,41 @@ import os
 
 load_dotenv()
 
-embeddings = OpenAIEmbeddings(
-            model=config.EMBEDDING_MODEL,
-            openai_api_key=os.getenv('OPENROUTER_API_KEY'),
-            openai_api_base="https://openrouter.ai/api/v1",
-            tiktoken_enabled=False,
-            )
-connection = "postgresql+psycopg://langchain:langchain@localhost:5432/langchain"  # Uses psycopg3!
-vector_store = PGVector(
-    embeddings=embeddings,
-    collection_name="knowledge_base",
-    connection=connection,
+PGVECTOR_HOST = os.getenv("PGVECTOR_HOST", "127.0.0.1")
+PGVECTOR_PORT = int(os.getenv("PGVECTOR_PORT", "5432"))
+PGVECTOR_USER = os.getenv("PGVECTOR_USER", "langchain")
+PGVECTOR_PASSWORD = os.getenv("PGVECTOR_PASSWORD", "langchain")
+PGVECTOR_DB = os.getenv("PGVECTOR_DB", "langchain")
+connection = (
+    f"postgresql+psycopg://{PGVECTOR_USER}:{PGVECTOR_PASSWORD}"
+    f"@{PGVECTOR_HOST}:{PGVECTOR_PORT}/{PGVECTOR_DB}"
 )
+
+_vector_store = None
+
+
+def _get_vector_store():
+    """Connect to PostgreSQL only when a retrieval tool is actually used."""
+    global _vector_store
+    if _vector_store is None:
+        embeddings = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL)
+        _vector_store = PGVector(
+            embeddings=embeddings,
+            collection_name="knowledge_base",
+            connection=connection,
+        )
+    return _vector_store
 
 def fetch_full_document(user_query: str) -> Dict[str, Any]:
     """Finds and returns the full document content matching the user query along with its title and metadata.
     If no match is found, defaults to fetching the first 'RKS' document.
     """
     # 1. Search for user query
-    results = vector_store.similarity_search(user_query, k=1)
+    results = _get_vector_store().similarity_search(user_query, k=1)
     
     # 2. Fallback to 'RKS' search if initial search returns empty
     if not results:
-        results = vector_store.similarity_search("RKS", k=1)
+        results = _get_vector_store().similarity_search("RKS", k=1)
         if not results:
             return {
                 "title": "Document Not Found",
@@ -51,10 +63,14 @@ def fetch_full_document(user_query: str) -> Dict[str, Any]:
         }
 
     # 4. Fetch title & full text from SQL database
-    connection_string = "dbname=langchain user=langchain password=langchain host=localhost"
-    
     try:
-        with psycopg.connect(connection_string) as conn:
+        with psycopg.connect(
+            host=PGVECTOR_HOST,
+            port=PGVECTOR_PORT,
+            dbname=PGVECTOR_DB,
+            user=PGVECTOR_USER,
+            password=PGVECTOR_PASSWORD,
+        ) as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT title, full_content FROM documents WHERE id = %s", (doc_id,))
                 row = cursor.fetchone()
@@ -82,7 +98,7 @@ def fetch_full_document(user_query: str) -> Dict[str, Any]:
 @tool
 def fetch_relevant_documents(query : str) -> List[Dict[str, Any]]:
     """Retrieve the most relevant document chunks based on the query, including document title and relevance score."""
-    results = vector_store.similarity_search_with_relevance_scores(query, k=3)
+    results = _get_vector_store().similarity_search_with_relevance_scores(query, k=3)
     formatted_chunks = []
     for doc, score in results:
         formatted_chunks.append({

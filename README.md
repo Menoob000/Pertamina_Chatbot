@@ -1,5 +1,7 @@
 # Pertamina Procurement AI & Knowledge Assistant
 
+Alur **Pembuatan RKS dan preview** tersedia melalui menu Streamlit dan endpoint `/api/rks`. Lihat [panduan modul RKS](tools/rks/README.md) untuk penggunaan, renderer, dan batasan hasil ekstraksi.
+
 Platform AI terintegrasi untuk membantu dan mengotomatisasi proses pengadaan di lingkungan **PT Pertamina Patra Niaga**:
 1. **💬 Chatbot AI & RKS Viewer:** Asisten interaktif berbasis RAG (*Retrieval-Augmented Generation*) untuk pencarian, telaah, dan konversi dokumen RKS (*Rencana Kerja dan Syarat-Syarat*) dari database PostgreSQL menjadi format Microsoft Word (.docx) resmi Pertamina.
 2. **📑 Dokumen Tender Generator:** Layanan mandiri berbasis REST API FastAPI untuk menyusun Dokumen Tender lengkap (IKPP 40 butir, 30 artikel ketentuan umum, matriks evaluasi teknis Lampiran 2A, evaluasi CSMS, dan Rancangan Kontrak 18 pasal + Template SP3MK) sesuai Pedoman Pengadaan No. A03-001/PNG200000/2024-S9 Rev. 1.
@@ -9,7 +11,7 @@ Platform AI terintegrasi untuk membantu dan mengotomatisasi proses pengadaan di 
 ## 🚀 Prasyarat Sistem
 
 Pastikan software berikut telah terinstal pada sistem Anda:
-* **Python 3.11+**
+* **Python 3.12+** (selaras dengan `pyproject.toml` dan Dockerfile)
 * **[`uv`](https://github.com/astral-sh/uv)** (Python package & environment manager)
 * **Docker** (untuk menjalankan container PostgreSQL pgvector)
 
