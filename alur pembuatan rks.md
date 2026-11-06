@@ -31,7 +31,7 @@ Hasil diberi identitas sebagai **draf tertata dari RKS referensi** beserta nama 
 3. Ringkasan singkat berisi dokumen sumber, status hasil (`lengkap`, `perlu pemeriksaan`, atau `gagal`), jumlah halaman/bagian yang dipindahkan, keberadaan BOQ, dan bagian yang belum dapat dipindahkan dengan yakin.
 4. Jejak sumber internal per bagian atau tabel: nama file dan nomor halaman PDF asal.
 
-Jika beberapa RKS sama-sama relevan dan tidak ada pilihan yang cukup jelas, agent meminta satu klarifikasi sederhana kepada pengguna. Jika sumber terpilih tidak lengkap atau sebagian halaman tidak dapat dibaca, sistem menyatakan keterbatasan tersebut secara jelas pada hasil.
+Jika beberapa RKS sama-sama relevan, sistem memilih kandidat peringkat pertama secara konsisten dan menampilkan alternatif serta catatan bahwa pengguna perlu mencocokkan proyeknya. Jika tidak ada sumber yang melewati ambang, sistem membuat template umum dengan placeholder yang jelas belum didukung knowledge base. Jika sumber terpilih tidak lengkap atau sebagian halaman tidak dapat dibaca, sistem menyatakan keterbatasan tersebut secara jelas pada hasil.
 
 ## 4. Alur pengguna
 
@@ -39,7 +39,7 @@ Jika beberapa RKS sama-sama relevan dan tidak ada pilihan yang cukup jelas, agen
 
 Agent mengenali jenis pekerjaan dan objek dari kalimat pengguna, lalu mencari kandidat RKS. Pemilihan mempertimbangkan jenis pekerjaan, objek/aset, dan kecocokan ruang lingkup. Misalnya, RKS *overhaul* tangki tidak dicampur dengan RKS pembangunan tangki baru hanya karena keduanya menyebut tangki.
 
-Agent memilih satu dokumen utama yang paling cocok dan mencatat nama serta halaman sumber. Jika tidak ada kandidat yang memadai, agent meminta petunjuk tambahan; ia tidak membuat RKS dari ingatan model.
+Agent memilih satu dokumen utama yang paling cocok dan mencatat nama serta halaman sumber. Pencarian kata kunci mempertahankan kode aset persis; pencarian semantik PGVector dapat menambah bukti per bagian. Ambang dan jumlah hasil dapat dikonfigurasi. Jika tidak ada kandidat yang memadai, renderer membuat template umum berisi struktur dan placeholder, tanpa menulis fakta proyek dari ingatan model.
 
 ### Tahap 2 — Ambil isi lengkap beserta struktur
 
@@ -80,8 +80,8 @@ flowchart TD
     A["Pengguna meminta RKS dengan bahasa sederhana"] --> B["Kenali jenis pekerjaan dan objek"]
     B --> C["Cari kandidat di knowledge base"]
     C --> D{"Sumber yang sesuai ditemukan?"}
-    D -- "Tidak" --> E["Minta petunjuk singkat dari pengguna"]
-    E --> C
+    D -- "Tidak" --> E["Buat template umum dengan placeholder tanpa fakta proyek"]
+    E --> R
     D -- "Ya" --> F["Pilih RKS utama dan catat sumber"]
     F --> G["Ekstrak isi dan inventaris semua elemen per halaman"]
     G --> H{"Ada elemen yang tidak terbaca dengan yakin?"}
@@ -129,6 +129,12 @@ sequenceDiagram
     UI->>A: Kirim permintaan
     A->>KB: Cari dan pilih RKS yang sesuai
     KB-->>A: Dokumen sumber dan metadata
+    alt Tidak ada sumber melewati ambang
+        A->>T: Buat template umum dengan placeholder
+        T->>P: Render DOCX final menjadi PDF preview
+        P-->>UI: Template dan preview tanpa sitasi KB
+        UI-->>U: Jelaskan bagian yang harus diisi dan diperiksa
+    else Sumber sesuai ditemukan
     A->>X: Ambil isi lengkap dan inventaris seluruh elemen
     X-->>A: Isi terstruktur dengan nomor halaman dan bagian yang tidak pasti
     A->>T: Tuangkan isi terstruktur apa adanya ke template
@@ -145,6 +151,7 @@ sequenceDiagram
         Q-->>A: Hasil cek nomor halaman dan tampilan
         A-->>UI: DOCX, PDF preview, status, dan catatan pemeriksaan
         UI-->>U: Tampilkan preview serta tombol unduh versi yang sama
+    end
     end
 ```
 
@@ -193,7 +200,7 @@ DOCX yang dibuka di Microsoft Word pada perangkat pengguna dapat mengalami sedik
 7. **Penyajian preview:** menampilkan PDF per halaman serta menjaga pasangan DOCX–PDF tetap berasal dari versi yang sama.
 8. **Pemeriksaan hasil:** membandingkan semua elemen dengan sumber, menetapkan status kelengkapan, serta meninjau tampilan halaman pada preview.
 
-Alur `rag/doc_loader.py` saat ini menggabungkan teks halaman dan memecahnya untuk pencarian semantik. Jalur itu membantu menemukan dokumen, tetapi belum menyimpan struktur halaman dan tabel yang diperlukan untuk memindahkan seluruh RKS secara setia. Implementasi fitur ini membutuhkan jalur ekstraksi dokumen lengkap yang terpisah atau melengkapi indeks pencarian yang ada.
+Alur `rag/doc_loader.py` kini memecah teks per halaman dan menyimpan nomor halaman pada chunk baru untuk pencarian semantik. Indeks lama perlu dimigrasikan agar metadata halaman tersedia. Jalur ekstraksi dokumen lengkap tetap terpisah karena chunk pencarian saja tidak menyimpan struktur tabel dan elemen visual yang diperlukan untuk memindahkan seluruh RKS secara setia.
 
 ## 11. Tahapan implementasi
 
@@ -215,7 +222,7 @@ Bandingkan hasil dengan PDF sumber pada sampel yang mewakili paragraf panjang, t
 
 ### Tahap E — Pengalaman pengguna
 
-Sediakan satu permintaan sederhana untuk membuat RKS, tampilkan sumber yang dipilih, status hasil, dan preview halaman. Berikan file yang sama dengan hasil preview untuk status `lengkap` atau draf bertanda untuk status `perlu pemeriksaan`; jelaskan kegagalan tanpa klaim file lengkap untuk status `gagal`. Minta klarifikasi hanya saat pemilihan sumber memang ambigu.
+Sediakan satu permintaan sederhana untuk membuat RKS, tampilkan sumber yang dipilih otomatis, status hasil, dan preview halaman. Berikan file yang sama dengan hasil preview untuk status `lengkap` atau draf bertanda untuk status `perlu pemeriksaan`; jelaskan kegagalan tanpa klaim file lengkap untuk status `gagal`. Jika sumber tidak ditemukan, buat template umum berplaceholder dan jelaskan bahwa ia belum berbasis sumber KB.
 
 ## 12. Kriteria selesai untuk tahap ini
 
@@ -241,11 +248,11 @@ Tahap ini menilai **kesetiaan pemindahan isi dan kualitas format**. Pemeriksaan 
 
 Alur tersedia melalui menu **Pembuatan RKS dan preview** pada Streamlit, tool agent `create_rks_document`, CLI, dan endpoint `/api/rks`. Implementasi berada di `tools/rks/` dengan panduan pada [README modul RKS](tools/rks/README.md).
 
-- Pencarian memakai katalog PDF asli dalam `data/`, membedakan jenis pekerjaan, dan meminta pilihan jika beberapa sumber sama relevannya.
-- Ekstraksi dan renderer bekerja tanpa generasi ulang teks oleh model. Inventaris halaman menyimpan teks, tabel, elemen visual, dan catatan bagian yang tidak pasti.
+- Pencarian memakai katalog PDF asli dalam `data/`, membedakan jenis pekerjaan, memilih sumber otomatis, lalu mencari bukti per bagian melalui kata kunci dan PGVector bila tersedia. Hasil dengan skor sama disertai catatan dan alternatif. Tanpa sumber yang memenuhi ambang, hasilnya adalah template umum dengan placeholder.
+- Ekstraksi dan renderer bekerja tanpa generasi ulang teks oleh model. Keluaran RKS memetakan lapisan teks, heading, dan tabel bergaris PDF ke struktur Word editable. Sampul formal dibentuk secara dinamis dari judul, pekerjaan, risiko, dan perusahaan pada dokumen sumber; heading Word digunakan untuk daftar isi.
 - DOCX dan PDF disimpan sebagai pasangan versi dengan hash; unduhan menolak file yang berubah setelah finalisasi.
 - Adapter Word pada Windows sudah diuji untuk memperbarui daftar isi di DOCX, menyimpannya, memeriksa bookmark tujuan, lalu merender PDF. Adapter LibreOffice tersedia, tetapi verifikasi nomor halaman daftar isinya masih menghasilkan status perlu pemeriksaan.
-- Halaman dengan karakter rusak, tabel tanpa pemetaan sel yang pasti, atau tata letak beberapa kolom dapat dipertahankan sebagai gambar. Bagian tersebut tetap mengikuti tampilan sumber dan belum sepenuhnya dapat diedit atau dirapikan. Hasil menyatakan status perlu pemeriksaan.
+- Gambar halaman tidak dimasukkan ke DOCX RKS. Simbol yang tidak terbaca ditandai dalam teks; logo, tanda centang, diagram, serta struktur sel gabungan yang tidak dapat dipetakan tetap memerlukan pemeriksaan terhadap PDF asli. Halaman tanpa lapisan teks memerlukan transkripsi manual.
 - BOQ mengikuti sumber terpilih. Penggabungan otomatis dengan BOQ terpisah belum diaktifkan tanpa metadata hubungan sumber yang dapat dipastikan.
 
-Verifikasi mencakup sembilan pengujian regresi, pembuatan DOCX dari delapan PDF sumber, serta navigasi dan penggantian sumber pada antarmuka. Sampel 041T314 telah dirender melalui Word: 25 entri daftar isi cocok dengan halaman tujuan dan tidak ada token teks hasil pemindahan yang hilang pada pemeriksaan otomatis. Pemeriksaan visual dilakukan pada preview sampel; hasil tetap perlu pemeriksaan karena bagian tertentu dipertahankan sebagai gambar sumber.
+Verifikasi terbaru mencakup 23 pengujian regresi. Sampel overhaul tangki 041T304 berbasis teks berhasil dirender melalui Word: 33 entri daftar isi cocok dengan halaman tujuan, tidak ada token literal hasil ekstraksi yang hilang, dan DOCX tidak memiliki gambar. Hasil tetap perlu pemeriksaan terhadap PDF sumber karena elemen grafis serta hubungan sel tabel tidak tersalin sebagai teks. Template umum tiga halaman juga berhasil dirender dari DOCX final.

@@ -18,7 +18,8 @@ except Exception as exc:
     app, tools = None, []
     AGENT_IMPORT_ERROR = str(exc)
 from tools.tender.streamlit_tender_view import render_tender_generator_page
-from tools.rks.streamlit_view import render_rks_page, render_tool_result
+from tools.rks.streamlit_view import render_rks_page, render_chat_preview
+from tools.rks.chat import current_document as select_chat_document
 from tools.docx_exporter import parse_text_to_rks_data
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
 
@@ -32,7 +33,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
+st.html(
     dedent("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
@@ -279,7 +280,6 @@ st.markdown(
     }
     </style>
     """),
-    unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------------------------
@@ -371,55 +371,7 @@ def extract_docx_path(text: str) -> Optional[str]:
 
 
 def get_current_thread_document(thread_id: str) -> Optional[Dict[str, Any]]:
-    """Retrieves the latest document fetched by fetch_full_documents or generated in this thread along with its title and original PDF path."""
-    messages = get_thread_messages(thread_id)
-    for msg in reversed(messages):
-        # 1. Check ToolMessage from fetch_full_documents / return_full_docs
-        if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in ("fetch_full_documents", "return_full_docs", "fetch_full_document"):
-            content = msg.content
-            doc_str = ""
-            doc_title = ""
-            source_file = ""
-
-            if isinstance(content, dict):
-                doc_str = content.get("full_docs", "")
-                doc_title = content.get("title", "")
-                source_file = content.get("source_file", "")
-            elif isinstance(content, str):
-                if "'full_docs':" in content or '"full_docs":' in content:
-                    try:
-                        parsed_dict = ast.literal_eval(content)
-                        if isinstance(parsed_dict, dict):
-                            doc_str = parsed_dict.get("full_docs", "")
-                            doc_title = parsed_dict.get("title", "")
-                            source_file = parsed_dict.get("source_file", "")
-                    except Exception:
-                        pass
-                if not doc_str:
-                    doc_str = content
-
-            if doc_str and len(doc_str.strip()) > 20:
-                clean_title = doc_title or source_file or "Fetched RKS Document"
-                pdf_path = find_matching_pdf(clean_title)
-                return {
-                    "source": "fetch_full_documents",
-                    "content": doc_str,
-                    "title": clean_title,
-                    "source_file": source_file,
-                    "pdf_path": pdf_path,
-                }
-
-        # 2. Check AIMessage containing substantial RKS structure
-        if isinstance(msg, AIMessage) and msg.content and ("BAB 1" in msg.content or "RENCANA KERJA" in msg.content):
-            if len(msg.content.strip()) > 100:
-                return {
-                    "source": "generated_rks",
-                    "content": msg.content,
-                    "title": "Generated RKS Draft",
-                    "source_file": "",
-                    "pdf_path": None,
-                }
-    return None
+    return select_chat_document(get_thread_messages(thread_id))
 
 
 def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
@@ -427,7 +379,10 @@ def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
     if tc_name == "create_rks_document":
         try:
             artifact = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
-            render_tool_result(artifact, key=f"rks-history-{artifact.get('artifact_id', uuid.uuid4().hex)}")
+            st.write(f"Status RKS: {artifact.get('status', 'belum tersedia')}")
+            if artifact.get("source"):
+                st.caption(artifact["source"]["filename"])
+            st.caption("Halaman hasil dan unduhan tersedia pada panel Pratinjau halaman.")
         except (ValueError, TypeError):
             st.text(str(raw_content))
         return
@@ -441,7 +396,7 @@ def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
 
     if tc_name == "fetch_full_documents" and isinstance(content, dict):
         title = content.get("title", "Untitled Document")
-        st.markdown(f"<div class='doc-title-badge'>📄 Document Title: <strong>{title}</strong></div>", unsafe_allow_html=True)
+        st.html(f"<div class='doc-title-badge'>📄 Document Title: <strong>{title}</strong></div>")
         full_text = content.get("full_docs", "")
         st.caption(f"Fetched full content ({len(full_text)} characters). Preview below:")
         st.text(full_text[:500] + ("..." if len(full_text) > 500 else ""))
@@ -454,7 +409,7 @@ def format_tool_output_display(tc_name: str, raw_content: Any) -> Any:
                 t = item.get("title") or item.get("document_title", "Unknown Document")
                 score = item.get("relevance_score") or item.get("score", "N/A")
                 snippet = str(item.get("content", ""))[:200]
-                st.markdown(f"{idx}. <span class='doc-title-badge'>📄 {t}</span> <span style='font-size:0.75rem; color:#64748B;'>Score: {score}</span>", unsafe_allow_html=True)
+                st.html(f"{idx}. <span class='doc-title-badge'>📄 {t}</span> <span style='font-size:0.75rem; color:#64748B;'>Score: {score}</span>")
                 st.caption(f"> {snippet}...")
         return
 
@@ -473,7 +428,7 @@ def render_docx_download_card(file_path: str, key: str):
         with open(file_path, "rb") as f:
             data = f.read()
 
-        st.markdown(
+        st.html(
             f"""
             <div class="download-card">
                 <div class="download-info">
@@ -482,7 +437,6 @@ def render_docx_download_card(file_path: str, key: str):
                 </div>
             </div>
             """,
-            unsafe_allow_html=True,
         )
         st.download_button(
             label=f"📥 Download {fname}",
@@ -591,7 +545,7 @@ with st.sidebar:
         st.rerun()
 
     st.write("")
-    st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Recent Conversations</p>", unsafe_allow_html=True)
+    st.html("<p style='font-size:0.75rem; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Recent Conversations</p>")
 
     thread_keys = list(st.session_state.threads.keys())
     for t_id in thread_keys:
@@ -637,19 +591,17 @@ with st.sidebar:
                 open_pdf_converter_dialog(pdf_options[selected_pdf_name], selected_pdf_name)
 
     # Agent Tools Section
-    st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Agent Capabilities</p>", unsafe_allow_html=True)
+    st.html("<p style='font-size:0.75rem; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Agent Capabilities</p>")
 
     if st.session_state.active_tool_now:
-        st.markdown(
+        st.html(
             f"<div style='padding:6px 10px; background:#EFF6FF; border:1px solid #BFDBFE; border-radius:6px; font-size:0.8rem; color:#0072CE; font-weight:600; margin-bottom:8px;'>"
             f"⚡ Running: <code>{st.session_state.active_tool_now}</code></div>",
-            unsafe_allow_html=True,
         )
     else:
-        st.markdown(
+        st.html(
             "<div style='padding:6px 10px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px; font-size:0.8rem; color:#475569; font-weight:600; margin-bottom:8px;'>"
             "🟢 Agent Status: Ready</div>",
-            unsafe_allow_html=True,
         )
 
     with st.expander("🔧 Available Agent Tools", expanded=False):
@@ -658,12 +610,11 @@ with st.sidebar:
             t_desc = getattr(t, "description", "")
             is_convert = "convert" in t_name or "docx" in t_name
             badge_class = "tool-badge-red" if is_convert else "tool-badge-blue"
-            st.markdown(
+            st.html(
                 f"<div style='margin-bottom:6px;'>"
                 f"<span class='{badge_class}'>● {t_name}</span><br>"
                 f"<span style='font-size:0.75rem; color:#64748B;'>{t_desc.strip().splitlines()[0][:70]}</span>"
                 f"</div>",
-                unsafe_allow_html=True,
             )
 
     # Exported Documents in ./output/
@@ -675,7 +626,7 @@ with st.sidebar:
                 for f_idx, docx_file in enumerate(docx_files[:4]):
                     f_name = docx_file.name
                     f_size = docx_file.stat().st_size / 1024
-                    st.markdown(f"<span style='font-size:0.82rem; font-weight:600;'>📄 {f_name[:24]}...</span> <span style='font-size:0.75rem; color:#64748B;'>({f_size:.1f} KB)</span>", unsafe_allow_html=True)
+                    st.html(f"<span style='font-size:0.82rem; font-weight:600;'>📄 {f_name[:24]}...</span> <span style='font-size:0.75rem; color:#64748B;'>({f_size:.1f} KB)</span>")
                     with open(docx_file, "rb") as df:
                         st.download_button(
                             label="⬇️ Download",
@@ -715,14 +666,13 @@ current_doc_data = get_current_thread_document(current_thread_id)
 
 top_col1, top_col2, top_col3 = st.columns([3, 1, 1])
 with top_col1:
-    st.markdown(
+    st.html(
         f"""
         <div class="brand-title">
             <span class="brand-accent-blue">Pertamina</span> <span class="brand-accent-red">Knowledge</span> Assistant
             <span class="thread-pill">💬 {current_thread['title']}</span>
         </div>
         """,
-        unsafe_allow_html=True,
     )
 with top_col2:
     # Popup Button in Topbar when an RKS document is loaded
@@ -752,7 +702,7 @@ else:
 with chat_col:
     # Empty State Hero
     if len(thread_messages) == 0:
-        st.markdown(
+        st.html(
             """
             <div class="hero-container">
                 <div style="display:inline-block; padding:8px 12px; border-radius:50%; background:#F1F5F9; margin-bottom:8px;">
@@ -764,7 +714,6 @@ with chat_col:
                 </div>
             </div>
             """,
-            unsafe_allow_html=True,
         )
 
         col1, col2, col3 = st.columns(3)
@@ -818,7 +767,7 @@ with chat_col:
 
                     with st.chat_message("assistant", avatar=AVATAR_ASSISTANT):
                         with st.status(f"⚙️ Tool: {tc_name}", state="complete", expanded=False):
-                            st.markdown(f"<span class='{badge_type}'>Invoked: {tc_name}</span>", unsafe_allow_html=True)
+                            st.html(f"<span class='{badge_type}'>Invoked: {tc_name}</span>")
                             st.write("**Inputs:**")
                             st.json(tc_args)
                             if matching_tool_msg:
@@ -857,18 +806,17 @@ with chat_col:
 # ===========================================================================
 if doc_col:
     with doc_col:
-        st.markdown(
+        st.html(
             """
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <span style="font-weight:700; font-size:1.1rem; color:#0F172A;">📄 Document Viewer</span>
                 <span style="font-size:0.75rem; color:#64748B; font-weight:600;">LIVE PREVIEW</span>
             </div>
             """,
-            unsafe_allow_html=True,
         )
 
         if not current_doc_data:
-            st.markdown(
+            st.html(
                 """
                 <div class="doc-empty-state">
                     <span style="font-size:2.4rem;">📑</span>
@@ -878,7 +826,6 @@ if doc_col:
                     </p>
                 </div>
                 """,
-                unsafe_allow_html=True,
             )
         else:
             doc_raw = current_doc_data["content"]
@@ -893,7 +840,7 @@ if doc_col:
             babs = parsed_rks.get("bab", [])
 
             # Paper Card Container showing explicit document title
-            st.markdown(
+            st.html(
                 f"""
                 <div class="doc-viewer-container">
                     <div class="doc-top-stripe"></div>
@@ -901,27 +848,25 @@ if doc_col:
                         <div class="doc-paper-title">📄 {display_title}</div>
                         <div style="margin-top:6px;">
                             <span class="doc-metadata-pill">📁 File: {source_file or display_title}</span>
-                            <span class="doc-metadata-csms">CSMS: {doc_csms}</span>
-                            <span class="doc-metadata-pill">{len(babs)} Bab</span>
+                            <span class="doc-metadata-csms">Draf referensi</span>
+                            <span class="doc-metadata-pill">Pratinjau DOCX</span>
                         </div>
                     </div>
                 </div>
                 """,
-                unsafe_allow_html=True,
             )
 
             # Document Viewer Tabs
-            tab_preview, tab_outline, tab_convert = st.tabs(["📖 Document Text", "📑 Chapter Outline", "⚡ Convert PDF to DOCX"])
+            tab_preview, tab_source, tab_outline, tab_convert = st.tabs(["Pratinjau halaman", "Teks sumber", "Daftar bab", "Konversi PDF asli"])
 
             with tab_preview:
-                st.markdown(
-                    f"""
-                    <div class="doc-paper-body">
-                    """,
-                    unsafe_allow_html=True,
-                )
-                st.markdown(doc_raw)
-                st.markdown("</div>", unsafe_allow_html=True)
+                render_chat_preview(current_doc_data, current_thread_id)
+
+            with tab_source:
+                if doc_raw:
+                    st.markdown(doc_raw)
+                else:
+                    st.caption("Isi dokumen ditampilkan pada tab Pratinjau halaman dari hasil DOCX.")
 
             with tab_outline:
                 if babs:
@@ -1020,8 +965,7 @@ if user_prompt:
                         for tm in tool_msgs:
                             tm_content = tm.content
                             if tm.name == "create_rks_document":
-                                st.session_state["last_rks_tool_content"] = tm_content
-                                render_tool_result(tm_content, key=f"rks-tool-{tm.id}")
+                                st.info("Hasil RKS akan ditampilkan pada panel Pratinjau halaman setelah proses selesai.")
                             if tm.name == "fetch_full_documents" and isinstance(tm_content, dict):
                                 fetched_title = tm_content.get("title", "Untitled Document")
                                 st.success(f"📄 **Document Fetched:** `{fetched_title}`")

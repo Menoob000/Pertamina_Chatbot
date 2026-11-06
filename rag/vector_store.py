@@ -26,7 +26,8 @@ def _get_vector_store():
     """Connect to PostgreSQL only when a retrieval tool is actually used."""
     global _vector_store
     if _vector_store is None:
-        embeddings = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL)
+        embeddings = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL,
+                                          model_kwargs={"local_files_only": True})
         _vector_store = PGVector(
             embeddings=embeddings,
             collection_name="knowledge_base",
@@ -36,24 +37,18 @@ def _get_vector_store():
 
 def fetch_full_document(user_query: str) -> Dict[str, Any]:
     """Finds and returns the full document content matching the user query along with its title and metadata.
-    If no match is found, defaults to fetching the first 'RKS' document.
+    Never substitutes an unrelated RKS when the query has no match.
     """
-    # 1. Search for user query
-    results = _get_vector_store().similarity_search(user_query, k=1)
-    
-    # 2. Fallback to 'RKS' search if initial search returns empty
-    if not results:
-        results = _get_vector_store().similarity_search("RKS", k=1)
-        if not results:
-            return {
-                "title": "Document Not Found",
-                "full_docs": "No matching document or fallback RKS template found.",
-                "error": True
-            }
+    try:
+        results = _get_vector_store().similarity_search_with_relevance_scores(user_query, k=1)
+    except Exception:
+        return {"title": "Sumber tidak ditemukan", "full_docs": "Layanan pencarian tidak tersedia.", "error": True}
+    if not results or results[0][1] < config.RKS_SEARCH_SCORE_THRESHOLD:
+        return {"title": "Sumber tidak ditemukan", "full_docs": "Tidak ada dokumen yang memenuhi ambang kecocokan.", "error": True}
 
     # 3. Safely extract metadata
-    doc_id: Optional[str] = results[0].metadata.get("document_id")
-    file_name: str = results[0].metadata.get("file_name", "Untitled Document")
+    doc_id: Optional[str] = results[0][0].metadata.get("document_id")
+    file_name: str = results[0][0].metadata.get("file_name", "Untitled Document")
 
     if not doc_id:
         return {
@@ -81,7 +76,9 @@ def fetch_full_document(user_query: str) -> Dict[str, Any]:
                         "title": doc_title,
                         "full_docs": row[1],
                         "document_id": doc_id,
-                        "source_file": file_name
+                        "source_file": file_name,
+                        "matched_page": results[0][0].metadata.get("page"),
+                        "relevance_score": round(float(results[0][1]), 3),
                     }
                 return {
                     "title": file_name,
@@ -96,13 +93,28 @@ def fetch_full_document(user_query: str) -> Dict[str, Any]:
         }
 
 @tool
-def fetch_relevant_documents(query : str) -> List[Dict[str, Any]]:
+def fetch_relevant_documents(query: str, top_k: int = 3,
+                             score_threshold: float = -1.0,
+                             document_type: str = "") -> List[Dict[str, Any]]:
     """Retrieve the most relevant document chunks based on the query, including document title and relevance score."""
-    results = _get_vector_store().similarity_search_with_relevance_scores(query, k=3)
+    threshold = config.RKS_SEARCH_SCORE_THRESHOLD if score_threshold < 0 else score_threshold
+    if not 0 <= threshold <= 1:
+        raise ValueError("score_threshold harus di antara 0 dan 1")
+    filters = {"document_type": document_type} if document_type else None
+    try:
+        results = _get_vector_store().similarity_search_with_relevance_scores(query, k=max(1, top_k), filter=filters)
+    except Exception:
+        return []
     formatted_chunks = []
     for doc, score in results:
+        if score < threshold:
+            continue
         formatted_chunks.append({
             "title": doc.metadata.get("file_name", "Unknown Document"),
+            "source_id": doc.metadata.get("document_id"),
+            "page": doc.metadata.get("page"),
+            "version": doc.metadata.get("version"),
+            "year": doc.metadata.get("year"),
             "content": doc.page_content,
             "relevance_score": round(float(score), 3)
         })

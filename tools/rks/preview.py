@@ -14,6 +14,9 @@ def finalize_and_preview(docx: Path, heading_count: int) -> dict:
     if engine in {"auto", "word"} and sys.platform == "win32":
         import importlib.util
         if importlib.util.find_spec("win32com"):
+            system_drive = Path(os.environ.get("SystemRoot", "C:/Windows")).anchor
+            if system_drive and shutil.disk_usage(system_drive).free < 64 * 1024 * 1024:
+                return {"available": False, "message": f"Ruang drive sistem {system_drive} tidak cukup untuk Word. Kosongkan ruang, lalu klik Buat ulang DOCX dan preview."}
             try:
                 result = subprocess.run([sys.executable, str(Path(__file__).with_name("office_worker.py")),
                                          str(docx), str(report)], capture_output=True, text=True, timeout=240)

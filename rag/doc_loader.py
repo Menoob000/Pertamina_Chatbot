@@ -1,11 +1,11 @@
 import os
 import uuid
+import re
 import psycopg
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_postgres import PGVector
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_experimental.text_splitter import SemanticChunker
 import config
 from dotenv import load_dotenv
 load_dotenv()
@@ -37,7 +37,7 @@ def loader(file_path='./data', connection=PGVECTOR_CONNECTION):
         source_file = os.path.basename(doc.metadata.get("source", "unknown"))
         if source_file not in grouped_docs:
             grouped_docs[source_file] = []
-        grouped_docs[source_file].append(doc.page_content)
+        grouped_docs[source_file].append(doc)
 
     # 2. Setup Embeddings and PGVector Store
     embeddings = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL)
@@ -48,7 +48,10 @@ def loader(file_path='./data', connection=PGVECTOR_CONNECTION):
     )
 
     # 3. Process each document
-    text_splitter = SemanticChunker(embeddings=embeddings)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=config.RKS_SEARCH_CHUNK_SIZE,
+        chunk_overlap=config.RKS_SEARCH_CHUNK_OVERLAP,
+    )
 
     db_conn = psycopg.connect(
         host=PGVECTOR_HOST,
@@ -72,19 +75,31 @@ def loader(file_path='./data', connection=PGVECTOR_CONNECTION):
 
         doc_id = str(uuid.uuid4())
         # Before inserting into PostgreSQL, sanitize NUL bytes
-        full_text = "\n".join(pages).replace("\x00", "")
+        full_text = "\n".join(page.page_content for page in pages).replace("\x00", "")
 
-        # Insert raw, full document into standard SQL table
+        # Split document into smaller chunks for vector search
+        chunks, metadatas = [], []
+        year = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", file_name)
+        version = re.search(r"\b(?:rev(?:isi)?|versi|v)[ ._-]*(\d+)\b", file_name, re.I)
+        for page in pages:
+            number = int(page.metadata.get("page", 0)) + 1
+            section = next((line.strip() for line in page.page_content.splitlines()
+                            if re.match(r"^(?:BAB\s+[IVXLC\d]+|\d+(?:\.\d+)*[.)]?\s+)", line.strip(), re.I)), None)
+            for chunk in text_splitter.split_text(page.page_content.replace("\x00", "")):
+                chunks.append(chunk)
+                metadatas.append({"document_id": doc_id, "file_name": file_name,
+                                  "page": number,
+                                  "document_type": "RKS" if "rks" in file_name.lower() else "lainnya",
+                                  **({"section": section} if section else {}),
+                                  **({"year": int(year.group())} if year else {}),
+                                  **({"version": version.group(1)} if version else {})})
+        if not chunks:
+            print(f"Skipping unreadable document: {file_name}")
+            continue
         cursor.execute(
             "INSERT INTO documents (id, title, full_content) VALUES (%s, %s, %s)",
             (doc_id, file_name, full_text)
         )
-
-        # Split document into smaller chunks for vector search
-        chunks = text_splitter.split_text(full_text)
-        
-        # Prepare metadata for each chunk so it references the original document ID
-        metadatas = [{"document_id": doc_id, "file_name": file_name} for _ in chunks]
 
         # Add vector embeddings into PGVector store
         vector_store.add_texts(texts=chunks, metadatas=metadatas)

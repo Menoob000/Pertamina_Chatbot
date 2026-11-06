@@ -42,9 +42,9 @@ return_full_docs = fetch_full_documents
 @tool
 def create_rks_document(query: str, source_id: str = "") -> str:
     """Create a faithful formatted RKS DOCX and page preview from local knowledge-base PDFs.
-    Use for requests to create/prepare a complete RKS. Never draft its contents in chat.
-    If multiple sources match, returns candidates; ask the user to choose and call again
-    with its source_id. Report the returned status and source without claiming customization.
+    Source selection is automatic; do not ask inexperienced users to choose a PDF.
+    When no source meets the threshold, return a general template with placeholders.
+    Never draft unsupported facts in chat. Optional source_id is only for explicit requests.
     """
     return json.dumps(create_document(query, source_id), ensure_ascii=False)
 
@@ -194,7 +194,7 @@ Apakah ada lampiran spesifikasi teknis atau rincian HPS yang perlu kita lengkapi
 </few_shot_examples>
 
 <fallback_instruction>
-Jika query pengguna ambigu atau informasi di database tidak mencukupi, jelaskan keterbatasan tersebut secara sopan dan mintalah nomor referensi pengadaan atau kata kunci dokumen yang lebih spesifik sebelum memanggil tool secara acak.
+Jika query pengguna ambigu atau informasi di database tidak mencukupi, jelaskan keterbatasan tersebut secara sopan. Khusus permintaan pembuatan RKS, tetap panggil `create_rks_document` agar sumber dipilih otomatis atau template umum dibuat bila tidak ada kecocokan; jangan meminta pengguna memilih PDF.
 </fallback_instruction>
 """
         )
@@ -205,7 +205,8 @@ Jika query pengguna ambigu atau informasi di database tidak mencukupi, jelaskan 
         "ATURAN KHUSUS PEMBUATAN RKS: Jika pengguna meminta membuat/menyiapkan dokumen RKS, "
         "panggil create_rks_document. Aturan ini menggantikan contoh penyusunan RKS dalam prompt sebelumnya. "
         "Jangan menulis ulang isi RKS di chat dan jangan mengarahkan permintaan ini ke konversi PDF lama. "
-        "Jika status pilih sumber, tampilkan kandidat dan minta satu pilihan; gunakan source_id yang dikembalikan. "
+        "Pemilihan sumber berlangsung otomatis; jangan meminta pengguna memilih PDF kecuali ia menyebut sumber tertentu. "
+        "Jika hasil adalah template umum, jelaskan bahwa placeholder belum didukung knowledge base. "
         "Jika status gagal, jelaskan kegagalan tanpa mengklaim file jadi. Untuk hasil lain, laporkan sumber, "
         "status dan catatan pemeriksaan apa adanya. Data proyek asal tetap tercantum; bukan penyesuaian proyek baru. "
         "Preview dan DOCX dibuat oleh tool; jangan membuat tautan file atau isi yang tidak dikembalikan tool."

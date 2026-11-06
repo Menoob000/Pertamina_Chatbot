@@ -10,6 +10,16 @@ load_dotenv()
 # Vector size: 384 (all-minilm-l6-v2)
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-minilm-l6-v2")
 
+# Pencarian RKS. Skor dinormalisasi ke 0..1 dan tetap perlu dikalibrasi pada KB nyata.
+RKS_SEARCH_TOP_K = int(os.getenv("RKS_SEARCH_TOP_K", "5"))
+RKS_SEARCH_SCORE_THRESHOLD = float(os.getenv("RKS_SEARCH_SCORE_THRESHOLD", "0.55"))
+RKS_SEARCH_KEYWORD_WEIGHT = float(os.getenv("RKS_SEARCH_KEYWORD_WEIGHT", "0.65"))
+RKS_SEARCH_SEMANTIC_WEIGHT = float(os.getenv("RKS_SEARCH_SEMANTIC_WEIGHT", "0.35"))
+RKS_SEARCH_SEMANTIC_ENABLED = os.getenv("RKS_SEARCH_SEMANTIC_ENABLED", "true").lower() in {"1", "true", "yes"}
+RKS_SEARCH_CHUNK_SIZE = int(os.getenv("RKS_SEARCH_CHUNK_SIZE", "1000"))
+RKS_SEARCH_CHUNK_OVERLAP = int(os.getenv("RKS_SEARCH_CHUNK_OVERLAP", "150"))
+RKS_SEARCH_MAX_SECTIONS = int(os.getenv("RKS_SEARCH_MAX_SECTIONS", "100"))
+
 # ========================
 # Qdrant Cloud Vector Store
 # ========================

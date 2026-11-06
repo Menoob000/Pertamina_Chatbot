@@ -1,26 +1,40 @@
 """Page-based preview of the exact finalized artifact, independent of the LLM."""
 import json
+from pathlib import Path
 
 import pymupdf
 import streamlit as st
 
-from .catalog import public_source
-from .service import search_sources, create_document, artifact_file, get_document
+from .catalog import list_sources
+from .service import create_document, artifact_file, get_document, latest_document
 
 
-def render_result(result: dict, key: str = "rks"):
+def render_result(result: dict, key: str = "rks", compact: bool = False):
     status = result.get("status", "gagal")
     if status == "gagal":
         st.error(result.get("message", "Pembuatan RKS gagal."))
         return
-    st.subheader("Draf tertata dari RKS referensi")
-    st.write(f"**Sumber:** {result['source']['filename']}")
+    if not compact:
+        st.subheader("Template umum RKS" if result.get("mode") == "template umum" else "Draf tertata dari RKS referensi")
+    if result.get("source"):
+        st.write(f"**Sumber:** {result['source']['filename']}")
+        st.caption(f"Dipilih otomatis; skor kecocokan {result.get('selection', {}).get('match_score', '—')}.")
+        if result.get("selection", {}).get("note"):
+            st.caption(result["selection"]["note"])
+    else:
+        st.info("Tidak ada sumber knowledge base yang cukup relevan. Dokumen berisi template umum dan placeholder.")
     st.caption(result.get("message", ""))
     if status == "lengkap":
         st.success("Lengkap berdasarkan pemeriksaan pemindahan isi.")
     else:
         st.warning("Perlu pemeriksaan — lihat catatan bagian yang belum pasti.")
-    with st.expander("Sumber dan catatan pemeriksaan", expanded=bool(result.get("issues"))):
+    with st.expander("Sumber dan catatan pemeriksaan", expanded=False):
+        for alternative in result.get("selection", {}).get("alternatives", [])[:3]:
+            st.caption(f"Alternatif yang tidak dipakai: {alternative['filename']}")
+        for section in result.get("evidence", []):
+            if section.get("sources"):
+                top = section["sources"][0]
+                st.caption(f"{section['section']}: {top['filename']}, halaman {top.get('page') or 'tidak tersedia'}, skor {top['score']}")
         for issue in result.get("issues", []):
             prefix = f"Halaman sumber {issue['page']}: " if issue.get("page") else ""
             st.write(prefix + issue["message"])
@@ -48,31 +62,51 @@ def render_result(result: dict, key: str = "rks"):
         st.error(f"Dokumen tidak dapat dibuka. Buat ulang RKS. {exc}")
 
 
+def render_chat_preview(document: dict, thread_id: str):
+    """Render the generated pages in the chat's primary document panel."""
+    tool_result = document.get("rks_result")
+    if tool_result is not None:
+        if not tool_result.get("artifact_id"):
+            render_tool_result(tool_result, f"chat-{thread_id}")
+            return
+        try:
+            result = get_document(tool_result["artifact_id"])
+            render_result(result, f"chat-{thread_id}-{result['artifact_id']}", compact=True)
+        except (OSError, ValueError):
+            st.error("Hasil RKS pada percakapan ini tidak tersedia. Buat ulang RKS dari sumbernya.")
+        return
+
+    pdf_path = document.get("pdf_path")
+    source = next((s for s in list_sources() if pdf_path and
+                   Path(s["path"]).resolve() == Path(pdf_path).resolve()), None)
+    if source is None:
+        st.info("Pilih atau ambil RKS acuan dari knowledge base untuk membuat preview halaman.")
+        return
+    key = f"chat-rks-{thread_id}-{source['source_id']}"
+    retry = st.button("Buat ulang DOCX dan preview", key=f"{key}-retry")
+    result = st.session_state.get(key)
+    if not retry and (result is None or not result.get("preview", {}).get("available")):
+        result = latest_document(source["source_id"]) or result
+    if result is None or retry:
+        with st.spinner("Menyiapkan DOCX dan preview halaman dari RKS acuan…"):
+            result = create_document(source["filename"], source["source_id"])
+    st.session_state[key] = result
+    render_result(result, f"{key}-{result.get('artifact_id', 'failed')}", compact=True)
+
+
 def render_rks_page():
     st.title("Pembuatan RKS")
-    st.write("Temukan RKS acuan, tata isinya ke Word, lalu periksa halaman hasilnya.")
+    st.write("Tulis pekerjaan yang dibutuhkan. Sistem memilih sumber secara otomatis atau menyiapkan template umum bila tidak ada sumber yang sesuai.")
     with st.form("rks-search"):
         query = st.text_input("Pekerjaan yang dibutuhkan", placeholder="Buatkan RKS overhaul tangki")
-        search = st.form_submit_button("Cari RKS acuan", type="primary")
+        search = st.form_submit_button("Buat DOCX dan preview", type="primary")
     if search:
-        # Clear a previous result as soon as the source request changes.
         st.session_state.pop("rks_result", None)
-        st.session_state.pop("rks_source_choice", None)
-        st.session_state["rks_query"] = query
-        st.session_state["rks_candidates"] = [public_source(x) for x in search_sources(query)] if query.strip() else []
-    candidates = st.session_state.get("rks_candidates", [])
-    if candidates:
-        def clear_result():
-            st.session_state.pop("rks_result", None)
-        selected = st.selectbox("RKS acuan", range(len(candidates)),
-                                format_func=lambda i: f"{candidates[i]['filename']} ({candidates[i]['pages']} halaman)",
-                                key="rks_source_choice", on_change=clear_result)
-        if st.button("Buat DOCX dan preview", type="primary"):
-            st.session_state.pop("rks_result", None)
-            with st.spinner("Memindahkan isi sumber dan merender halaman…"):
-                st.session_state["rks_result"] = create_document(st.session_state["rks_query"], candidates[selected]["source_id"])
-    elif search:
-        st.info("RKS belum ditemukan. Coba jenis pekerjaan atau nomor aset yang lebih spesifik.")
+        if query.strip():
+            with st.spinner("Mencari sumber, membuat DOCX, dan merender preview?"):
+                st.session_state["rks_result"] = create_document(query)
+        else:
+            st.info("Tulis jenis pekerjaan terlebih dahulu.")
     if st.session_state.get("rks_result"):
         render_result(st.session_state["rks_result"])
 

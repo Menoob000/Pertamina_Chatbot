@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pymupdf
+import config
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -55,8 +56,11 @@ def search_sources(query: str, data_dir: Path = DATA_DIR) -> list[dict]:
         if not overlap or not (wanted & name_words):
             continue
         score = sum(5 if x in name_words else 1 for x in overlap)
-        results.append({**source, "score": score, "matched_terms": sorted(overlap)})
-    return sorted(results, key=lambda x: (-x["score"], x["filename"]))
+        coverage = len(overlap) / len(wanted)
+        if coverage >= config.RKS_SEARCH_SCORE_THRESHOLD:
+            results.append({**source, "score": score, "match_score": round(coverage, 4),
+                            "matched_terms": sorted(overlap)})
+    return sorted(results, key=lambda x: (-x["match_score"], -x["score"], x["filename"]))[:max(1, config.RKS_SEARCH_TOP_K)]
 
 
 def public_source(source: dict) -> dict:

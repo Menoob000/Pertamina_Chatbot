@@ -4,6 +4,8 @@ import re
 
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
@@ -42,7 +44,312 @@ def _reflow(text):
     return output
 
 
+def _set_cell_border(cell, color="000000", size="8"):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    borders = tc_pr.first_child_found_in("w:tcBorders")
+    if borders is None:
+        borders = OxmlElement("w:tcBorders")
+        tc_pr.append(borders)
+    for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        node = borders.find(qn(f"w:{side}"))
+        if node is None:
+            node = OxmlElement(f"w:{side}")
+            borders.append(node)
+        node.set(qn("w:val"), "single")
+        node.set(qn("w:sz"), size)
+        node.set(qn("w:color"), color)
+
+
+def _set_cell_margins(cell, top=80, start=100, bottom=80, end=100):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    margins = tc_pr.first_child_found_in("w:tcMar")
+    if margins is None:
+        margins = OxmlElement("w:tcMar")
+        tc_pr.append(margins)
+    for side, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+        node = margins.find(qn(f"w:{side}"))
+        if node is None:
+            node = OxmlElement(f"w:{side}")
+            margins.append(node)
+        node.set(qn("w:w"), str(value))
+        node.set(qn("w:type"), "dxa")
+
+
+def _set_page_border(section):
+    sect_pr = section._sectPr
+    borders = sect_pr.first_child_found_in("w:pgBorders")
+    if borders is None:
+        borders = OxmlElement("w:pgBorders")
+        sect_pr.append(borders)
+    borders.set(qn("w:offsetFrom"), "page")
+    # The cover is the only RKS page that carries an outer frame.  Word's
+    # firstPage display setting keeps all subsequent document pages unboxed.
+    borders.set(qn("w:display"), "firstPage")
+    for side in ("top", "left", "bottom", "right"):
+        edge = OxmlElement(f"w:{side}")
+        edge.set(qn("w:val"), "single")
+        edge.set(qn("w:sz"), "8")
+        edge.set(qn("w:space"), "24")
+        edge.set(qn("w:color"), "000000")
+        borders.append(edge)
+
+
+def _add_box(doc, text, *, size=10, bold=False, before=0, after=0):
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(before)
+    paragraph.paragraph_format.space_after = Pt(after)
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    cell = table.cell(0, 0)
+    _set_cell_border(cell)
+    _set_cell_margins(cell, top=70, bottom=70)
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    content = cell.paragraphs[0]
+    content.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    content.paragraph_format.space_after = Pt(0)
+    run = content.add_run(text)
+    run.bold = bold
+    run.font.size = Pt(size)
+    return table
+
+
+def _table_widths(rows, columns: int) -> list[float]:
+    """Assign compact widths to short fields and space to descriptive fields."""
+    longest = [max((len(str(row[index])) if index < len(row) else 0 for row in rows), default=0)
+               for index in range(columns)]
+    compact = [length <= 12 for length in longest]
+    widths = [1.35 if is_compact else 0.0 for is_compact in compact]
+    flexible = [index for index in range(columns) if not compact[index]]
+    remaining = max(4.0, 16.3 - sum(widths))
+    weight_total = sum(max(12, min(longest[index], 65)) for index in flexible) or 1
+    for index in flexible:
+        weight = max(12, min(longest[index], 65))
+        widths[index] = remaining * weight / weight_total
+    return widths
+
+
+def _set_fixed_table_layout(table):
+    properties = table._tbl.tblPr
+    layout = properties.first_child_found_in("w:tblLayout")
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        properties.append(layout)
+    layout.set(qn("w:type"), "fixed")
+
+
+def _append_table(doc, rows):
+    columns = max((len(row) for row in rows), default=0)
+    if not columns:
+        return
+    table = doc.add_table(rows=0, cols=columns)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    _set_fixed_table_layout(table)
+    widths = _table_widths(rows, columns)
+    for index, width in enumerate(widths):
+        table.columns[index].width = Cm(width)
+    for row_index, values in enumerate(rows):
+        cells = table.add_row().cells
+        for index, cell in enumerate(cells):
+            text = str(values[index] if index < len(values) else "")
+            cell.text = text
+            cell.width = Cm(widths[index])
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            _set_cell_border(cell, color="D9D9D9", size="6")
+            _set_cell_margins(cell, top=85, bottom=85, start=115, end=115)
+            for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.line_spacing = 1.0
+                if row_index == 0 or len(text) <= 18:
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                else:
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                for run in paragraph.runs:
+                    run.font.size = Pt(8.5)
+                    if row_index == 0:
+                        run.bold = True
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+def _numeric_indent(depth: int) -> Cm:
+    """Return an intentional, readable indentation for hierarchical labels."""
+    # A heading such as 5.2 stays at the body margin.  Its descendants move
+    # right in small, consistent steps, matching conventional RKS formatting.
+    return Cm(0.48 + max(0, min(depth - 3, 4)) * 0.34)
+
+
+def _apply_list_indent(paragraph, indent: Cm, *, justify: bool = False) -> None:
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY if justify else WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.left_indent = indent
+    paragraph.paragraph_format.first_line_indent = Cm(-0.30)
+    paragraph.paragraph_format.keep_together = True
+
+
+def _render_editable_layout(extracted: dict, output: Path) -> None:
+    """Build an editable cover, Word headings, tables and TOC from PDF geometry."""
+    doc = Document()
+    section = doc.sections[0]
+    section.page_width, section.page_height = Cm(21), Cm(29.7)
+    section.top_margin = section.bottom_margin = Cm(2.2)
+    section.left_margin = section.right_margin = Cm(2.2)
+    section.different_first_page_header_footer = True
+    for name in ("Normal", "Title", "Heading 1", "Heading 2", "Heading 3"):
+        style = doc.styles[name]
+        style.font.name = "Arial"
+        style.font.color.rgb = RGBColor(0, 0, 0)
+        for border in style.element.xpath('.//w:pBdr'):
+            border.getparent().remove(border)
+    normal = doc.styles["Normal"]
+    normal.font.size = Pt(9.5)
+    normal.paragraph_format.space_after = Pt(1)
+    normal.paragraph_format.line_spacing = 1.1
+    for level, size in ((1, 12), (2, 10.5), (3, 10)):
+        style = doc.styles[f"Heading {level}"]
+        style.font.size = Pt(size)
+        style.paragraph_format.space_before = Pt(8)
+        style.paragraph_format.space_after = Pt(3)
+        style.paragraph_format.keep_with_next = True
+    header = section.header.paragraphs[0]
+    header.text = "Draf tertata dari RKS referensi"
+    header.runs[0].font.size = Pt(8)
+    footer = section.footer.paragraphs[0]
+    footer.add_run("Halaman ")
+    _field(footer, "PAGE")
+
+    _set_page_border(section)
+    cover = extracted["pages"][0]
+    cover_elements = cover["elements"]
+    entries = [(element["text"].replace("RESIKOpekerjaan", "RESIKO pekerjaan").replace("\t", "    "),
+                element["bbox"][1]) for element in cover_elements]
+    title_index = next((index for index, (text, _) in enumerate(entries)
+                        if re.search(r"RENCANA\s+KERJA.*(?:SYARAT|RKS)", text, re.I)), None)
+    title = entries[title_index][0] if title_index is not None else "RENCANA KERJA DAN SYARAT-SYARAT"
+    title = f"{title}\n(RKS)" if "(RKS)" not in title.upper() else title
+    omitted = {title, "(RKS)"}
+    def contains(*terms):
+        return lambda text: any(term in text.upper() for term in terms)
+    has_formal_fields = any("BIDDER" in text.upper() or "RESIKO" in text.upper() or "RISIKO" in text.upper()
+                            for text, _ in entries)
+    work = [text for text, y in entries if .12 * cover["height"] < y < .45 * cover["height"]
+            and not contains("RENCANA KERJA", "BIDDER", "RESIKO", "RISIKO", "HIGH", "MIDDLE", "LOW")(text)
+            and text not in omitted]
+    bidder = next((text for text, _ in entries if "BIDDER" in text.upper()), "Bidder List No: ______________________")
+    risk = next((text for text, _ in entries if "RESIKO" in text.upper() or "RISIKO" in text.upper()),
+                "RESIKO PEKERJAAN (ASPEK CSMS):")
+    options = next((text for text, _ in entries if all(word in text.upper() for word in ("HIGH", "MIDDLE", "LOW"))),
+                   "☐ HIGH    ☐ MIDDLE    ☐ LOW")
+    company = next((text for text, y in entries if "PT " in text.upper() and y > .5 * cover["height"]),
+                   "[Nama perusahaan dari sumber]")
+    _add_box(doc, title, size=14, bold=True, before=62, after=16)
+    if has_formal_fields:
+        _add_box(doc, "\n".join(work) or "[Nama pekerjaan dari sumber]", size=9.5, bold=True, after=18)
+        for text, before, bold in ((bidder, 0, False), (risk, 5, False), (options, 3, False)):
+            para = doc.add_paragraph()
+            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            para.paragraph_format.space_before = Pt(before)
+            para.paragraph_format.space_after = Pt(0)
+            run = para.add_run(text)
+            run.bold = bold
+            run.font.size = Pt(9)
+        logo = Path("assets/logo_pertamina.png")
+        if logo.is_file():
+            logo_paragraph = doc.add_paragraph()
+            logo_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            logo_paragraph.paragraph_format.space_before = Pt(16)
+            logo_paragraph.add_run().add_picture(str(logo), width=Cm(3.4))
+        company_paragraph = doc.add_paragraph()
+        company_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        company_paragraph.paragraph_format.space_before = Pt(118)
+        run = company_paragraph.add_run(company)
+        run.bold = True
+        run.font.size = Pt(10)
+    else:
+        after_title = entries[title_index + 1:] if title_index is not None else entries
+        summary = [text for text, _ in after_title if text not in omitted and len(text) <= 120 and
+                   not re.match(r"^(?:REV|DATE|DOC\.?\s*NO|SHEET|LOKASI\s*:?)\b", text, re.I)]
+        summary = summary[:4] or [Path(extracted["source"]["filename"]).stem]
+        generic = doc.add_paragraph()
+        generic.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        generic.paragraph_format.space_before = Pt(32)
+        generic.paragraph_format.space_after = Pt(0)
+        run = generic.add_run("\n".join(summary))
+        run.bold = True
+        run.font.size = Pt(10)
+
+    doc.add_page_break()
+    doc.add_paragraph("Daftar isi", "Title")
+    _field(doc.add_paragraph(), 'TOC \\o "1-3" \\h \\z \\u')
+    doc.add_page_break()
+    last_number_depth = 0
+    last_list_indent = None
+    for page in extracted["pages"][1:]:
+        if page.get("replaced_toc"):
+            continue
+        if any(e.get("source_role") == "unreadable" for e in page["elements"]):
+            warning = doc.add_paragraph(f"[Halaman sumber {page['page']} tidak terbaca sebagai teks]")
+            warning.runs[0].italic = True
+        for element in page["elements"]:
+            if element["kind"] == "heading":
+                doc.add_paragraph(element["text"], f"Heading {element['level']}")
+                last_number_depth = 0
+                last_list_indent = None
+            elif element["kind"] == "table" and element.get("editable"):
+                _append_table(doc, element["rows"])
+                last_number_depth = 0
+                last_list_indent = None
+            elif element.get("source_role") == "layout_label":
+                # Signature/approval labels are visual blocks in the source,
+                # not continuations of the preceding narrative sentence.
+                paragraph = doc.add_paragraph()
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                paragraph.paragraph_format.left_indent = Cm(0.48)
+                paragraph.paragraph_format.space_before = Pt(3)
+                paragraph.paragraph_format.space_after = Pt(1)
+                run = paragraph.add_run(element["text"])
+                run.bold = True
+                last_number_depth = 0
+                last_list_indent = None
+            else:
+                paragraph = doc.add_paragraph(element["text"])
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                depth = element.get("number_depth", 0)
+                if depth:
+                    indent = _numeric_indent(depth)
+                    _apply_list_indent(paragraph, indent)
+                    last_number_depth = depth
+                    last_list_indent = indent
+                elif element.get("list_kind") in {"alpha", "bullet"}:
+                    # Alphabetical and bulleted items are children of the
+                    # latest numbered clause, never reset to the page margin.
+                    parent = _numeric_indent(last_number_depth) if last_number_depth else Cm(0.48)
+                    indent = Cm(parent.cm + 0.44)
+                    _apply_list_indent(paragraph, indent, justify=True)
+                    last_list_indent = indent
+                elif element.get("value_line") and last_number_depth:
+                    # Values are paired with their immediately preceding
+                    # specification label, at the same hierarchy level.
+                    _apply_list_indent(paragraph, last_list_indent or _numeric_indent(last_number_depth))
+                elif not element.get("value_line"):
+                    # Narrative lines belonging to a numbered or alphabetical
+                    # item must never jump back to the page margin.  Unlike a
+                    # list marker, they use no hanging indent and may justify.
+                    if last_list_indent is not None:
+                        paragraph.paragraph_format.left_indent = last_list_indent
+                        paragraph.paragraph_format.first_line_indent = Cm(0)
+    update = OxmlElement("w:updateFields")
+    update.set(qn("w:val"), "true")
+    doc.settings.element.append(update)
+    doc.core_properties.title = Path(extracted["source"]["filename"]).stem
+    doc.core_properties.comments = (f"Teks dan tabel dari {extracted['source']['filename']}; SHA256: "
+                                    f"{extracted['source']['sha256']}. Elemen grafis perlu pemeriksaan.")
+    doc.save(output)
+
+
 def render_document(extracted: dict, output: Path) -> None:
+    if extracted.get("mode") in {"text_only", "editable_layout"}:
+        return _render_editable_layout(extracted, output)
     doc = Document()
     section = doc.sections[0]
     section.page_width, section.page_height = Cm(21), Cm(29.7)

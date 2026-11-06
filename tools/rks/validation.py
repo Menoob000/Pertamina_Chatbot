@@ -18,6 +18,8 @@ def validate_docx(extracted, path):
             else:
                 images += 1
     document = Document(path)
+    if extracted.get("cover_logo"):
+        images += 1
     actual = "\n".join(Paragraph(p, document).text for p in document.element.xpath('.//w:p'))
     missing = Counter(re.findall(r"\S+", "\n".join(expected))) - Counter(re.findall(r"\S+", actual))
     return {"missing_literal_tokens": sum(missing.values()), "expected_images": images,

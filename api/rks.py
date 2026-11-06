@@ -2,9 +2,11 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+import config
 
 from tools.rks.catalog import public_source
-from tools.rks.service import create_document, get_document, artifact_file, search_sources
+from tools.rks.service import create_document, get_document, artifact_file, search_sources, list_sources
+from tools.rks.retrieval import search_evidence
 
 router = APIRouter(prefix="/api/rks", tags=["RKS"])
 
@@ -14,9 +16,32 @@ class RKSRequest(BaseModel):
     source_id: str = Field(default="", max_length=24, pattern=r"^(?:[0-9a-f]{24})?$")
 
 
+class RKSSearchRequest(BaseModel):
+    query: str = Field(min_length=3, max_length=500)
+    source_id: str = Field(default="", max_length=24, pattern=r"^(?:[0-9a-f]{24})?$")
+    document_type: str = "RKS"
+    year: int | None = None
+    version: str | None = None
+    section: str | None = None
+    top_k: int = Field(default_factory=lambda: config.RKS_SEARCH_TOP_K, ge=1, le=50)
+    score_threshold: float = Field(default_factory=lambda: config.RKS_SEARCH_SCORE_THRESHOLD, ge=0, le=1)
+
+
 @router.get("/sources")
 def sources(query: str = Query(min_length=3, max_length=500)):
     return {"sources": [public_source(x) for x in search_sources(query)]}
+
+
+@router.post("/search")
+def search(payload: RKSSearchRequest):
+    catalog = list_sources()
+    if payload.source_id:
+        catalog = [s for s in catalog if s["source_id"] == payload.source_id]
+    return search_evidence(payload.query, catalog,
+                           filters={"document_type": payload.document_type,
+                                    "year": payload.year, "version": payload.version,
+                                    "section": payload.section},
+                           top_k=payload.top_k, score_threshold=payload.score_threshold)
 
 
 @router.post("/generate")
