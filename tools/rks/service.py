@@ -18,7 +18,7 @@ from .retrieval import search_evidence
 from .template import render_general_template
 
 OUTPUT_DIR = ROOT / "output" / "rks"
-PIPELINE_VERSION = "rks-editable-layout-v8"
+PIPELINE_VERSION = "rks-editable-layout-v16"
 
 
 def _general_template(query: str, output_dir: Path, render_preview: bool) -> dict:

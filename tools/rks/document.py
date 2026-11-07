@@ -165,7 +165,10 @@ def _append_table(doc, rows):
                 if row_index == 0 or len(text) <= 18:
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 else:
-                    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                    # Table cells must wrap naturally. Justification spreads
+                    # short extracted fragments across the cell width and
+                    # makes RKS evidence tables appear artificially sparse.
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 for run in paragraph.runs:
                     run.font.size = Pt(8.5)
                     if row_index == 0:
@@ -180,11 +183,34 @@ def _numeric_indent(depth: int) -> Cm:
     return Cm(0.48 + max(0, min(depth - 3, 4)) * 0.34)
 
 
-def _apply_list_indent(paragraph, indent: Cm, *, justify: bool = False) -> None:
+def _apply_list_indent(paragraph, indent: Cm, *, marker_indent: Cm | None = None,
+                       justify: bool = False) -> None:
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY if justify else WD_ALIGN_PARAGRAPH.LEFT
     paragraph.paragraph_format.left_indent = indent
-    paragraph.paragraph_format.first_line_indent = Cm(-0.30)
+    paragraph.paragraph_format.first_line_indent = (
+        Cm(marker_indent.cm - indent.cm) if marker_indent is not None else Cm(-0.30)
+    )
     paragraph.paragraph_format.keep_together = True
+
+
+def _marker_width(text: str) -> float:
+    """Approximate the inline width of a source list marker in the body font."""
+    match = re.match(r"^((?:\d+(?:\.\d+)*[.)]?)|(?:[a-z]+\.))\s*", text, re.I)
+    if not match:
+        return 0.55
+    return max(0.72, min(1.65, len(match.group(1)) * 0.155 + 0.12))
+
+
+def _page_list_origin(page: dict) -> float:
+    positions = [element["bbox"][0] for element in page["elements"]
+                 if element.get("list_kind") in {"number", "ordinal", "alpha", "roman"}]
+    return min(positions) if positions else 0.0
+
+
+def _source_marker_indent(element: dict, origin: float) -> Cm:
+    """Map the source's x-position to a stable hierarchy level in Word."""
+    delta = max(0.0, element["bbox"][0] - origin)
+    return Cm(min(4.4, 0.20 + delta * 0.028))
 
 
 def _render_editable_layout(extracted: dict, output: Path) -> None:
@@ -232,6 +258,8 @@ def _render_editable_layout(extracted: dict, output: Path) -> None:
         return lambda text: any(term in text.upper() for term in terms)
     has_formal_fields = any("BIDDER" in text.upper() or "RESIKO" in text.upper() or "RISIKO" in text.upper()
                             for text, _ in entries)
+    first_page_is_body = (not has_formal_fields and
+                          any(re.match(r"^(?:BAB|PASAL)\b", text.strip(), re.I) for text, _ in entries))
     work = [text for text, y in entries if .12 * cover["height"] < y < .45 * cover["height"]
             and not contains("RENCANA KERJA", "BIDDER", "RESIKO", "RISIKO", "HIGH", "MIDDLE", "LOW")(text)
             and text not in omitted]
@@ -267,8 +295,11 @@ def _render_editable_layout(extracted: dict, output: Path) -> None:
         run.font.size = Pt(10)
     else:
         after_title = entries[title_index + 1:] if title_index is not None else entries
+        project_name = next((text for text, _ in after_title if re.match(r"^NAMA\s+PEKERJAAN\s*:", text, re.I)), None)
         summary = [text for text, _ in after_title if text not in omitted and len(text) <= 120 and
-                   not re.match(r"^(?:REV|DATE|DOC\.?\s*NO|SHEET|LOKASI\s*:?)\b", text, re.I)]
+                   not re.match(r"^(?:REV|DATE|DOC\.?\s*NO|SHEET|LOKASI\s*:?|BAB|PASAL|PENDAHULUAN|URAIAN)\b", text, re.I)]
+        if first_page_is_body:
+            summary = [project_name] if project_name else [Path(extracted["source"]["filename"]).stem]
         summary = summary[:4] or [Path(extracted["source"]["filename"]).stem]
         generic = doc.add_paragraph()
         generic.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -284,9 +315,11 @@ def _render_editable_layout(extracted: dict, output: Path) -> None:
     doc.add_page_break()
     last_number_depth = 0
     last_list_indent = None
-    for page in extracted["pages"][1:]:
+    body_pages = extracted["pages"] if first_page_is_body else extracted["pages"][1:]
+    for page in body_pages:
         if page.get("replaced_toc"):
             continue
+        page_list_origin = _page_list_origin(page)
         if any(e.get("source_role") == "unreadable" for e in page["elements"]):
             warning = doc.add_paragraph(f"[Halaman sumber {page['page']} tidak terbaca sebagai teks]")
             warning.runs[0].italic = True
@@ -315,22 +348,26 @@ def _render_editable_layout(extracted: dict, output: Path) -> None:
                 paragraph = doc.add_paragraph(element["text"])
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 depth = element.get("number_depth", 0)
-                if depth:
-                    indent = _numeric_indent(depth)
-                    _apply_list_indent(paragraph, indent)
-                    last_number_depth = depth
+                list_kind = element.get("list_kind")
+                if list_kind in {"number", "ordinal", "alpha", "roman"}:
+                    # PDF marker coordinates are preserved here. In RKS they
+                    # encode nested list levels more reliably than marker type.
+                    marker_indent = _source_marker_indent(element, page_list_origin)
+                    indent = Cm(marker_indent.cm + _marker_width(element["text"]))
+                    _apply_list_indent(paragraph, indent, marker_indent=marker_indent)
+                    last_number_depth = depth if depth else last_number_depth
                     last_list_indent = indent
-                elif element.get("list_kind") in {"alpha", "bullet"}:
-                    # Alphabetical and bulleted items are children of the
-                    # latest numbered clause, never reset to the page margin.
-                    parent = _numeric_indent(last_number_depth) if last_number_depth else Cm(0.48)
-                    indent = Cm(parent.cm + 0.44)
-                    _apply_list_indent(paragraph, indent, justify=True)
+                elif list_kind == "bullet":
+                    marker_indent = last_list_indent or _numeric_indent(last_number_depth)
+                    indent = Cm(marker_indent.cm + 0.48)
+                    _apply_list_indent(paragraph, indent, marker_indent=marker_indent, justify=True)
                     last_list_indent = indent
                 elif element.get("value_line") and last_number_depth:
                     # Values are paired with their immediately preceding
                     # specification label, at the same hierarchy level.
-                    _apply_list_indent(paragraph, last_list_indent or _numeric_indent(last_number_depth))
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    paragraph.paragraph_format.left_indent = last_list_indent or _numeric_indent(last_number_depth)
+                    paragraph.paragraph_format.first_line_indent = Cm(0)
                 elif not element.get("value_line"):
                     # Narrative lines belonging to a numbered or alphabetical
                     # item must never jump back to the page margin.  Unlike a

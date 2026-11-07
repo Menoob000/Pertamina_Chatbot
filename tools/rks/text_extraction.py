@@ -46,19 +46,35 @@ def _source_footer(line: dict, height: float) -> bool:
 
 
 def _rows(lines: list[dict]) -> list[dict]:
-    """Keep side-by-side cells on one editable row without changing literals."""
+    """Rebuild visual rows from PDF text fragments in reading order.
+
+    A single source line may be represented by several text objects with tiny
+    y-coordinate differences.  This is especially common for inline party
+    names such as KONTRAKTOR/PERUSAHAAN.  We group those fragments first and
+    use a tab only for a genuinely wide column gap.
+    """
+    bands: list[list[dict]] = []
+    for line in sorted(lines, key=lambda item: ((item["bbox"][1] + item["bbox"][3]) / 2, item["bbox"][0])):
+        center = (line["bbox"][1] + line["bbox"][3]) / 2
+        if bands:
+            band_center = sum((item["bbox"][1] + item["bbox"][3]) / 2 for item in bands[-1]) / len(bands[-1])
+            if abs(center - band_center) <= 5:
+                bands[-1].append(line)
+                continue
+        bands.append([line])
+
     rows = []
-    for line in lines:
-        if rows and abs(rows[-1]["bbox"][1] - line["bbox"][1]) < 3 and \
-                line["bbox"][0] > rows[-1]["bbox"][2] - 3:
-            row = rows[-1]
-            row["text"] += "\t" + line["text"]
-            row["bbox"][2] = max(row["bbox"][2], line["bbox"][2])
-            row["bbox"][3] = max(row["bbox"][3], line["bbox"][3])
-            row["bold"] = row["bold"] and line["bold"]
-            row["damaged"] |= line["damaged"]
-        else:
-            rows.append(dict(line))
+    for band in bands:
+        fragments = sorted(band, key=lambda item: item["bbox"][0])
+        row = dict(fragments[0])
+        for fragment in fragments[1:]:
+            gap = fragment["bbox"][0] - row["bbox"][2]
+            row["text"] += ("\t" if gap > 115 else " ") + fragment["text"]
+            row["bbox"][2] = max(row["bbox"][2], fragment["bbox"][2])
+            row["bbox"][3] = max(row["bbox"][3], fragment["bbox"][3])
+            row["bold"] = row["bold"] and fragment["bold"]
+            row["damaged"] |= fragment["damaged"]
+        rows.append(row)
     return rows
 
 
@@ -132,6 +148,74 @@ def _clean_cell(value) -> str:
     return value
 
 
+def _tidy_table_cell(text: str) -> str:
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _restore_inline_party_names(text)
+
+
+def _reconstruct_horizontal_table(page, found) -> list[list[str]]:
+    """Recover three-column tables that have horizontal rules only.
+
+    Several RKS PDFs draw row rules but omit vertical rules. PyMuPDF therefore
+    returns one wide column even though header text establishes Deliverables,
+    Evidence, and Batas Waktu as distinct columns.
+    """
+    rect = pymupdf.Rect(found.bbox)
+    if rect.width < 300:
+        return []
+    words = page.get_text("words", clip=rect)
+    if not words:
+        return []
+
+    visual_lines: list[list[tuple]] = []
+    for word in sorted(words, key=lambda item: ((item[1] + item[3]) / 2, item[0])):
+        center = (word[1] + word[3]) / 2
+        if visual_lines:
+            previous_center = sum((item[1] + item[3]) / 2 for item in visual_lines[-1]) / len(visual_lines[-1])
+            if abs(center - previous_center) <= 3:
+                visual_lines[-1].append(word)
+                continue
+        visual_lines.append([word])
+    if len(visual_lines) < 3:
+        return []
+
+    # These ratios match the stable three-column RKS layout and are applied
+    # only after a horizontal-rule table has already been found.
+    edges = (rect.x0, rect.x0 + rect.width * .30, rect.x0 + rect.width * .71, rect.x1)
+
+    def split_columns(line):
+        cells = [[] for _ in range(3)]
+        for word in sorted(line, key=lambda item: item[0]):
+            center = (word[0] + word[2]) / 2
+            column = 0 if center < edges[1] else 1 if center < edges[2] else 2
+            cells[column].append(word[4])
+        return [_tidy_table_cell(" ".join(cell)) for cell in cells]
+
+    split_lines = [split_columns(line) for line in visual_lines]
+    header = split_lines[0]
+    if sum(bool(cell) for cell in header) < 3:
+        return []
+
+    rows = [header]
+    current = ["", "", ""]
+    last_center = (visual_lines[1][0][1] + visual_lines[1][0][3]) / 2
+    for line, cells in zip(visual_lines[1:], split_lines[1:]):
+        center = sum((word[1] + word[3]) / 2 for word in line) / len(line)
+        # A large blank vertical gap denotes the next table record. Within a
+        # record, one cell may wrap over several visual source lines.
+        if center - last_center > 21 and any(current):
+            rows.append([_tidy_table_cell(cell) for cell in current])
+            current = ["", "", ""]
+        for index, cell in enumerate(cells):
+            if cell:
+                current[index] = f"{current[index]} {cell}".strip()
+        last_center = center
+    if any(current):
+        rows.append([_tidy_table_cell(cell) for cell in current])
+    return rows if len(rows) >= 2 else []
+
+
 def _tables(page) -> list[dict]:
     """Extract ruled PDF tables as editable Word-table data and geometry."""
     try:
@@ -202,17 +286,25 @@ def _is_layout_label(text: str) -> bool:
     """Keep signature and approval labels out of surrounding prose."""
     label = re.sub(r"\s+", " ", text).strip().upper()
     return label in {
-        "KONTRAKTOR", "PERUSAHAAN", "PENYEDIA", "PEMILIK PEKERJAAN",
-        "PARAF", "TANDA TANGAN", "PARAF/TANDA TANGAN", "DISETUJUI OLEH",
+        "PARAF / TANDA TANGAN", "PARAF/TANDA TANGAN", "DISETUJUI OLEH",
         "DIPERIKSA OLEH", "DIBUAT OLEH",
     }
+
+
+def _restore_inline_party_names(text: str) -> str:
+    """Restore spaces where a PDF joins a party-name overlay to nearby text."""
+    return re.sub(r"(?<=[a-z])(?=(?:KONTRAKTOR|PERUSAHAAN|PENYEDIA)\b)", " ", text)
 
 
 def _list_kind(text: str, number_depth: int) -> str:
     if number_depth:
         return "number"
+    if re.match(r"^\d+[.)]\s+", text):
+        return "ordinal"
     if re.match(r"^[a-z]\.?\s+", text):
         return "alpha"
+    if re.match(r"^[ivxlcdm]+\.\s+", text, re.I):
+        return "roman"
     if re.match(r"^(?:[-•*]|\([a-z]\))\s+", text):
         return "bullet"
     return ""
@@ -255,7 +347,7 @@ def extract_text_document(source: dict, assets: Path | None = None) -> dict:
                                            "bbox": [0, 0, page.rect.width, 20], "source_role": "unreadable"})
             else:
                 for line in _rows(lines):
-                    value = line["text"]
+                    value = _restore_inline_party_names(line["text"])
                     if number == 1:
                         value = value.replace("RESIKOpekerjaan", "RESIKO pekerjaan").replace("\t", "    ")
                     level = heading_level(value, line["bold"]) if number > 1 else 0
