@@ -24,6 +24,11 @@ def render_result(result: dict, key: str = "rks", compact: bool = False):
     else:
         st.info("Tidak ada sumber knowledge base yang cukup relevan. Dokumen berisi template umum dan placeholder.")
     st.caption(result.get("message", ""))
+    csms = result.get("csms_assessment") or {}
+    if csms.get("category"):
+        st.caption(f"Rekomendasi awal CSMS: {csms['category']} — {csms.get('note', '')}")
+    elif csms:
+        st.caption(f"CSMS belum dicentang otomatis: {csms.get('note', 'Bukti belum memadai.')}")
     if status == "lengkap":
         st.success("Lengkap berdasarkan pemeriksaan pemindahan isi.")
     else:
@@ -50,10 +55,20 @@ def render_result(result: dict, key: str = "rks", compact: bool = False):
                 left, right = st.columns([1, 2])
                 page_number = left.number_input("Halaman", 1, len(pdf), 1, key=f"{key}-page")
                 zoom = right.select_slider("Perbesaran", options=[75, 100, 125, 150], value=100, key=f"{key}-zoom")
+                start_page = int(page_number) - 1
+                st.caption(f"Halaman {page_number} sampai {len(pdf)} dari {len(pdf)}. Scroll ke bawah untuk melihat halaman berikutnya.")
+                with st.container(height=900, border=True):
+                    for index in range(start_page, len(pdf)):
+                        page = pdf[index]
+                        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom / 75, zoom / 75), alpha=False)
+                        st.caption(f"Halaman {index + 1} dari {len(pdf)}")
+                        st.image(pix.tobytes("png"), width=int(page.rect.width * zoom / 100))
+                """
                 page = pdf[int(page_number) - 1]
                 pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom / 75, zoom / 75), alpha=False)
                 st.caption(f"Halaman {page_number} dari {len(pdf)} • dirender dari DOCX unduhan yang sama")
                 st.image(pix.tobytes("png"), width=int(page.rect.width * zoom / 100))
+                """
             st.download_button("Unduh PDF yang dipreview", pdf_data, f"RKS-{result['artifact_id'][:8]}.pdf",
                                "application/pdf", key=f"{key}-pdf")
         else:

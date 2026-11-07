@@ -114,6 +114,64 @@ def _add_box(doc, text, *, size=10, bold=False, before=0, after=0):
     return table
 
 
+def _checkbox_control(label: str, checked: bool):
+    """Create a native Word checkbox content control with a visible fallback."""
+    sdt = OxmlElement("w:sdt")
+    properties = OxmlElement("w:sdtPr")
+    identifier = OxmlElement("w:id")
+    identifier.set(qn("w:val"), str(abs(hash(label)) % 2_000_000_000))
+    properties.append(identifier)
+    alias = OxmlElement("w:alias")
+    alias.set(qn("w:val"), f"CSMS {label}")
+    properties.append(alias)
+    tag = OxmlElement("w:tag")
+    tag.set(qn("w:val"), f"csms_{label.casefold()}")
+    properties.append(tag)
+    checkbox = OxmlElement("w14:checkbox")
+    checked_node = OxmlElement("w14:checked")
+    checked_node.set(qn("w14:val"), "1" if checked else "0")
+    checkbox.append(checked_node)
+    checked_state = OxmlElement("w14:checkedState")
+    checked_state.set(qn("w14:val"), "2612")
+    checked_state.set(qn("w14:font"), "Segoe UI Symbol")
+    checkbox.append(checked_state)
+    unchecked_state = OxmlElement("w14:uncheckedState")
+    unchecked_state.set(qn("w14:val"), "2610")
+    unchecked_state.set(qn("w14:font"), "Segoe UI Symbol")
+    checkbox.append(unchecked_state)
+    properties.append(checkbox)
+    sdt.append(properties)
+    content = OxmlElement("w:sdtContent")
+    run = OxmlElement("w:r")
+    run_properties = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    fonts.set(qn("w:ascii"), "Segoe UI Symbol")
+    fonts.set(qn("w:hAnsi"), "Segoe UI Symbol")
+    run_properties.append(fonts)
+    run.append(run_properties)
+    text = OxmlElement("w:t")
+    text.text = "☒" if checked else "☐"
+    run.append(text)
+    content.append(run)
+    sdt.append(content)
+    return sdt
+
+
+def _add_csms_controls(doc, assessment: dict | None):
+    """Place editable HIGH/MIDDLE/LOW checkboxes on the RKS cover."""
+    selected = (assessment or {}).get("category")
+    paragraph = doc.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_before = Pt(3)
+    paragraph.paragraph_format.space_after = Pt(0)
+    for index, category in enumerate(("HIGH", "MIDDLE", "LOW")):
+        paragraph._p.append(_checkbox_control(category, selected == category))
+        run = paragraph.add_run(f" {category}")
+        run.font.size = Pt(9)
+        if index < 2:
+            paragraph.add_run("     ")
+
+
 def _table_widths(rows, columns: int) -> list[float]:
     """Assign compact widths to short fields and space to descriptive fields."""
     longest = [max((len(str(row[index])) if index < len(row) else 0 for row in rows), default=0)
@@ -213,7 +271,7 @@ def _source_marker_indent(element: dict, origin: float) -> Cm:
     return Cm(min(4.4, 0.20 + delta * 0.028))
 
 
-def _render_editable_layout(extracted: dict, output: Path) -> None:
+def _render_editable_layout(extracted: dict, output: Path, csms_assessment: dict | None = None) -> None:
     """Build an editable cover, Word headings, tables and TOC from PDF geometry."""
     doc = Document()
     section = doc.sections[0]
@@ -273,7 +331,7 @@ def _render_editable_layout(extracted: dict, output: Path) -> None:
     _add_box(doc, title, size=14, bold=True, before=62, after=16)
     if has_formal_fields:
         _add_box(doc, "\n".join(work) or "[Nama pekerjaan dari sumber]", size=9.5, bold=True, after=18)
-        for text, before, bold in ((bidder, 0, False), (risk, 5, False), (options, 3, False)):
+        for text, before, bold in ((bidder, 0, False), (risk, 5, False)):
             para = doc.add_paragraph()
             para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.space_before = Pt(before)
@@ -281,6 +339,7 @@ def _render_editable_layout(extracted: dict, output: Path) -> None:
             run = para.add_run(text)
             run.bold = bold
             run.font.size = Pt(9)
+        _add_csms_controls(doc, csms_assessment)
         logo = Path("assets/logo_pertamina.png")
         if logo.is_file():
             logo_paragraph = doc.add_paragraph()
@@ -384,9 +443,9 @@ def _render_editable_layout(extracted: dict, output: Path) -> None:
     doc.save(output)
 
 
-def render_document(extracted: dict, output: Path) -> None:
+def render_document(extracted: dict, output: Path, csms_assessment: dict | None = None) -> None:
     if extracted.get("mode") in {"text_only", "editable_layout"}:
-        return _render_editable_layout(extracted, output)
+        return _render_editable_layout(extracted, output, csms_assessment=csms_assessment)
     doc = Document()
     section = doc.sections[0]
     section.page_width, section.page_height = Cm(21), Cm(29.7)

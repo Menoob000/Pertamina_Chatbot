@@ -16,9 +16,10 @@ from .preview import finalize_and_preview
 from .validation import validate_docx
 from .retrieval import search_evidence
 from .template import render_general_template
+from .csms import assess_csms
 
 OUTPUT_DIR = ROOT / "output" / "rks"
-PIPELINE_VERSION = "rks-editable-layout-v16"
+PIPELINE_VERSION = "rks-editable-layout-v17"
 
 
 def _general_template(query: str, output_dir: Path, render_preview: bool) -> dict:
@@ -83,6 +84,7 @@ def create_document(query: str, source_id: str = "", *, data_dir: Path = DATA_DI
         (folder / "extraction.json").write_text(json.dumps(extracted, ensure_ascii=False, indent=2), encoding="utf-8")
         if not any(p["elements"] for p in extracted["pages"]):
             raise ValueError("Tidak ada isi yang dapat dipindahkan.")
+        csms_assessment = assess_csms(query, extracted)
         headings = []
         section_provenance = []
         for page in extracted["pages"]:
@@ -105,7 +107,7 @@ def create_document(query: str, source_id: str = "", *, data_dir: Path = DATA_DI
                              "semantic_status": retrieved["semantic_status"],
                              "sources": retrieved["results"]})
         docx = folder / "RKS.docx"
-        render_document(extracted, docx)
+        render_document(extracted, docx, csms_assessment=csms_assessment)
         preview = finalize_and_preview(docx, extracted["heading_count"]) if render_preview else {
             "available": False, "message": "Preview belum dirender."}
         issues = list(extracted["issues"])
@@ -137,6 +139,7 @@ def create_document(query: str, source_id: str = "", *, data_dir: Path = DATA_DI
                     "match_score": source.get("match_score"), "alternatives": alternatives,
                     "note": selection_note}, "evidence": evidence,
                     "section_provenance": section_provenance,
+                    "csms_assessment": csms_assessment,
                     "status": "perlu pemeriksaan" if issues else "lengkap",
                     "source": public_source(source), "source_pages": len(extracted["pages"]),
                     "issues": issues, "preview": preview, "verification": verification,

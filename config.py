@@ -20,6 +20,14 @@ RKS_SEARCH_CHUNK_SIZE = int(os.getenv("RKS_SEARCH_CHUNK_SIZE", "1000"))
 RKS_SEARCH_CHUNK_OVERLAP = int(os.getenv("RKS_SEARCH_CHUNK_OVERLAP", "150"))
 RKS_SEARCH_MAX_SECTIONS = int(os.getenv("RKS_SEARCH_MAX_SECTIONS", "100"))
 
+# Rekomendasi awal CSMS pada sampul RKS. Ini bukan penetapan resmi; kategori
+# dikosongkan bila bukti dari dokumen tidak memenuhi ambang yang ditetapkan.
+RKS_CSMS_LLM_ENABLED = os.getenv("RKS_CSMS_LLM_ENABLED", "true").lower() in {"1", "true", "yes"}
+RKS_CSMS_HIGH_SCORE = int(os.getenv("RKS_CSMS_HIGH_SCORE", "4"))
+RKS_CSMS_MIDDLE_HIGH_SCORE = int(os.getenv("RKS_CSMS_MIDDLE_HIGH_SCORE", "2"))
+RKS_CSMS_MIDDLE_SCORE = int(os.getenv("RKS_CSMS_MIDDLE_SCORE", "2"))
+RKS_CSMS_LOW_SCORE = int(os.getenv("RKS_CSMS_LOW_SCORE", "1"))
+
 # ========================
 # Qdrant Cloud Vector Store
 # ========================

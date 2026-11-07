@@ -1,6 +1,6 @@
 # Pembuatan RKS dan preview
 
-Modul ini memilih PDF referensi dari `data/`, mengambil lapisan teks dan tabel bergarisnya, lalu membuat DOCX dengan sampul dinamis, heading Word, tabel editable, serta daftar isi otomatis. Model bahasa hanya mengarahkan permintaan ke tool. Isi file dibentuk tanpa panggilan generasi teks ke model.
+Modul ini memilih PDF referensi dari `data/`, mengambil lapisan teks dan tabel bergarisnya, lalu membuat DOCX dengan sampul dinamis, heading Word, tabel editable, serta daftar isi otomatis. Isi file dipindahkan dari sumber tanpa panggilan generasi teks ke model; model opsional hanya memberi pendapat kedua untuk rekomendasi awal CSMS di sampul.
 
 Jalankan antarmuka dari root proyek:
 
@@ -24,6 +24,11 @@ Nama PDF dan tiga halaman awal digunakan untuk shortlist kata kunci, kategori pe
 | `RKS_SEARCH_CHUNK_SIZE` | 1000 | Panjang potongan teks saat indeks dan pencarian lokal |
 | `RKS_SEARCH_CHUNK_OVERLAP` | 150 | Tumpang tindih potongan |
 | `RKS_SEARCH_MAX_SECTIONS` | 100 | Batas bagian yang dicari buktinya; jejak halaman asal tetap disimpan untuk semua heading |
+| `RKS_CSMS_LLM_ENABLED` | true | Gunakan model yang dikonfigurasi sebagai pendapat kedua untuk rekomendasi awal CSMS bila API key tersedia |
+| `RKS_CSMS_HIGH_SCORE` | 4 | Ambang indikator risiko tinggi untuk merekomendasikan HIGH |
+| `RKS_CSMS_MIDDLE_HIGH_SCORE` | 2 | Ambang indikator tinggi yang cukup untuk merekomendasikan MIDDLE |
+| `RKS_CSMS_MIDDLE_SCORE` | 2 | Ambang indikator risiko menengah untuk merekomendasikan MIDDLE |
+| `RKS_CSMS_LOW_SCORE` | 1 | Ambang indikator risiko rendah untuk merekomendasikan LOW |
 
 Skor adalah sinyal peringkat internal, bukan probabilitas bahwa isi dokumen benar. Tahun/versi diambil dari nama file jika ada; metadata yang tidak tersedia tidak ditebak. Indeks PGVector lama belum memiliki nomor halaman; jalankan ulang proses indeks untuk dokumen baru atau migrasikan indeks lama agar sitasi semantik memiliki halaman. Proses indeks baru memecah teks per halaman. Pencarian tidak menambahkan isi yang gagal diekstraksi, dan halaman ambigu tetap diberi tanda pemeriksaan.
 
@@ -42,13 +47,13 @@ Hasil tiap permintaan berada di `output/rks/<artifact_id>/`: `RKS.docx`, `RKS.pd
 - `RKS_RENDERER=word` atau `RKS_RENDERER=libreoffice` dapat membatasi pilihan. Jika tidak ada renderer yang dapat digunakan, DOCX tetap tersedia sebagai draf perlu pemeriksaan dan antarmuka menyatakan preview belum tersedia.
 - Container backend yang ada memerlukan volume `data/` untuk sumber PDF. Untuk preview dalam Linux/container, LibreOffice dan font template harus disediakan pada image saat tahap penyiapan deployment.
 
-Preview antarmuka menampilkan halaman dari PDF hasil render, dengan pilihan halaman dan perbesaran. Penggantian sumber menghapus hasil yang sedang ditampilkan. DOCX yang dibuka pada aplikasi/perangkat lain masih dapat bergeser karena perbedaan font dan mesin tata letak.
+Preview antarmuka menampilkan halaman dari PDF hasil render, dengan pilihan halaman dan perbesaran. Pemilih halaman menjadi titik awal untuk preview kontinu yang dapat discroll ke bawah. Penggantian sumber menghapus hasil yang sedang ditampilkan. DOCX yang dibuka pada aplikasi/perangkat lain masih dapat bergeser karena perbedaan font dan mesin tata letak.
 
 Pada chat, panel dokumen membuka tab **Pratinjau halaman** sebagai tab utama. RKS yang diambil lewat pencarian lama otomatis disiapkan menjadi DOCX dan preview dari sumber yang sama. Hasil yang hash sumber dan versi pipelinenya cocok dapat dipakai kembali; pergantian halaman tidak memicu pembuatan ulang. Tab **Teks sumber** menyimpan tampilan teks ekstraksi untuk pemeriksaan. Catatan pemeriksaan diringkas dalam panel tertutup agar halaman preview langsung terlihat.
 
 ## Kesetiaan isi dan batasan
 
-Keluaran RKS memakai struktur Word editable: sampul disusun dari teks yang terbaca pada PDF terpilih, judul bab/subbab menjadi heading Word agar masuk daftar isi, dan tabel bergaris dipetakan menjadi tabel Word. Sampul formal dengan field risiko memakai bingkai halaman, kotak judul, kotak nama pekerjaan, logo, dan nama perusahaan; sampul lain memakai judul serta ringkasan yang diambil dari PDF sumber. Hubungan sel gabungan, logo, centang, diagram, dan gambar lain tetap perlu diperiksa pada PDF asli. Simbol kontrol yang tidak dapat dibaca ditulis `[simbol tidak terbaca]`; halaman tanpa lapisan teks memerlukan transkripsi manual. Hasil seperti ini berstatus **perlu pemeriksaan** dan harus dibandingkan dengan PDF sumber sebelum digunakan.
+Keluaran RKS memakai struktur Word editable: sampul disusun dari teks yang terbaca pada PDF terpilih, judul bab/subbab menjadi heading Word agar masuk daftar isi, dan tabel bergaris dipetakan menjadi tabel Word. Sampul formal dengan field risiko memakai bingkai halaman, kotak judul, kotak nama pekerjaan, logo, nama perusahaan, serta checkbox Word HIGH/MIDDLE/LOW yang dapat diubah pengguna. Rekomendasi awal CSMS memakai indikator risiko yang tertelusur dari permintaan dan teks RKS; model yang dikonfigurasi hanya menjadi pendapat kedua bila tersedia. Rekomendasi kosong bila bukti tidak cukup dan tetap wajib divalidasi pihak berwenang. Hubungan sel gabungan, logo, centang, diagram, dan gambar lain tetap perlu diperiksa pada PDF asli. Simbol kontrol yang tidak dapat dibaca ditulis `[simbol tidak terbaca]`; halaman tanpa lapisan teks memerlukan transkripsi manual. Hasil seperti ini berstatus **perlu pemeriksaan** dan harus dibandingkan dengan PDF sumber sebelum digunakan.
 
 Status **lengkap** berarti pemeriksaan otomatis teks dan render lulus, bukan penilaian substansi atau persetujuan manusia. Deteksi heading dan hubungan kolom tabel bersifat heuristik; dokumen dengan tata letak kompleks tetap perlu ditinjau melalui preview. BOQ hanya mengikuti teks yang tersedia di sumber; sistem tidak membuat item atau nilai baru. BOQ terpisah tidak digabungkan otomatis tanpa hubungan sumber yang dapat dipastikan.
 
