@@ -44,6 +44,22 @@ def _reflow(text):
     return output
 
 
+_HEADING_TRANSLATIONS = re.compile(
+    r"\s*\((?:PROJECT\s+NAME|INTRODUCTION|OBJECTIVE(?:S)?|"
+    r"SCOPE\s+OF\s+WORK|GENERAL(?:\s+PROVISIONS)?|"
+    r"TECHNICAL\s+SPECIFICATION(?:S)?|SPECIFICATION(?:S)?|"
+    r"TERMS\s+AND\s+CONDITIONS|REQUIREMENT(?:S)?|"
+    r"PAYMENT|WARRANTY|INSPECTION|TESTING|COMPLETION|"
+    r"APPENDIX|ATTACHMENT)\)",
+    re.IGNORECASE,
+)
+
+
+def _without_heading_translation(text: str) -> str:
+    """Keep the Indonesian heading while removing its English translation."""
+    return _HEADING_TRANSLATIONS.sub("", text).strip()
+
+
 def _set_cell_border(cell, color="000000", size="8"):
     tc_pr = cell._tc.get_or_add_tcPr()
     borders = tc_pr.first_child_found_in("w:tcBorders")
@@ -295,9 +311,6 @@ def _render_editable_layout(extracted: dict, output: Path, csms_assessment: dict
         style.paragraph_format.space_before = Pt(8)
         style.paragraph_format.space_after = Pt(3)
         style.paragraph_format.keep_with_next = True
-    header = section.header.paragraphs[0]
-    header.text = "Draf tertata dari RKS referensi"
-    header.runs[0].font.size = Pt(8)
     footer = section.footer.paragraphs[0]
     footer.add_run("Halaman ")
     _field(footer, "PAGE")
@@ -384,7 +397,8 @@ def _render_editable_layout(extracted: dict, output: Path, csms_assessment: dict
             warning.runs[0].italic = True
         for element in page["elements"]:
             if element["kind"] == "heading":
-                doc.add_paragraph(element["text"], f"Heading {element['level']}")
+                doc.add_paragraph(_without_heading_translation(element["text"]),
+                                  f"Heading {element['level']}")
                 last_number_depth = 0
                 last_list_indent = None
             elif element["kind"] == "table" and element.get("editable"):
@@ -467,9 +481,6 @@ def render_document(extracted: dict, output: Path, csms_assessment: dict | None 
     for i, size in enumerate((13, 11, 10), 1):
         doc.styles[f"Heading {i}"].font.size = Pt(size)
         doc.styles[f"Heading {i}"].paragraph_format.keep_with_next = True
-    header = section.header.paragraphs[0]
-    header.text = "Draf tertata dari RKS referensi"
-    header.runs[0].font.size = Pt(8)
     footer = section.footer.paragraphs[0]
     footer.add_run("Halaman ")
     _field(footer, "PAGE")
@@ -502,7 +513,8 @@ def render_document(extracted: dict, output: Path, csms_assessment: dict | None 
                 text = element["text"]
                 # Only whitespace reflow changes; literals and units are kept.
                 if kind == "heading":
-                    doc.add_paragraph(text, f"Heading {element['level']}")
+                    doc.add_paragraph(_without_heading_translation(text),
+                                      f"Heading {element['level']}")
                 else:
                     paragraph = doc.add_paragraph(_reflow(text))
                     if element.get("source_role") == "margin":
