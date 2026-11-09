@@ -19,6 +19,7 @@ except Exception as exc:
     AGENT_IMPORT_ERROR = str(exc)
 from tools.tender.streamlit_tender_view import render_tender_generator_page
 from tools.rks.streamlit_view import render_rks_page, render_chat_preview
+from tools.rks.library_view import render_rks_library
 from tools.rks.chat import current_document as select_chat_document
 from tools.docx_exporter import parse_text_to_rks_data
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
@@ -580,6 +581,11 @@ AVATAR_USER = "👤"
 # ---------------------------------------------------------------------------
 # Sidebar: ChatGPT-like History & Tools Monitor
 # ---------------------------------------------------------------------------
+def _close_rks_pages():
+    st.session_state["show_rks_page"] = False
+    st.session_state["show_rks_library"] = False
+
+
 with st.sidebar:
     if os.path.exists("assets/logo_pertamina.png"):
         st.image("assets/logo_pertamina.png", width=160)
@@ -592,14 +598,21 @@ with st.sidebar:
     # Navigation Switcher
     if st.button("Pembuatan RKS dan preview", key="open_rks_page", use_container_width=True):
         st.session_state["show_rks_page"] = True
+        st.session_state["show_rks_library"] = False
+    if st.button("Gudang RKS", key="open_rks_library", use_container_width=True):
+        st.session_state["show_rks_library"] = True
+        st.session_state["show_rks_page"] = False
     if st.session_state.get("show_rks_page") and st.button("Kembali ke chat / tender", key="close_rks_page"):
         st.session_state["show_rks_page"] = False
+    if st.session_state.get("show_rks_library") and st.button("Kembali ke chat / tender", key="close_rks_library"):
+        st.session_state["show_rks_library"] = False
     nav_selection = st.radio(
         "Menu Navigasi",
         ["💬 Chatbot & RKS Viewer", "📑 Dokumen Tender Generator"],
         index=0 if st.session_state.get("nav_choice") != "tender" else 1,
         key="app_nav_radio_menu",
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        on_change=_close_rks_pages,
     )
     if "Tender" in nav_selection:
         st.session_state.nav_choice = "tender"
@@ -717,6 +730,10 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 if st.session_state.get("show_rks_page"):
     render_rks_page()
+    st.stop()
+
+if st.session_state.get("show_rks_library"):
+    render_rks_library()
     st.stop()
 
 if st.session_state.get("nav_choice") == "tender":

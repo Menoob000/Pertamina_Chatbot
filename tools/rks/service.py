@@ -193,6 +193,7 @@ def list_documents(output_dir: Path = OUTPUT_DIR, limit: int = 100) -> list[dict
             if manifest.get("artifact_id") != artifact_id:
                 continue
             source = manifest.get("source") or {}
+            related_documents = _related_documents(artifact_id, output_dir)
             documents.append({
                 "artifact_id": artifact_id,
                 "created_at": manifest.get("created_at") or datetime.fromtimestamp(
@@ -203,13 +204,60 @@ def list_documents(output_dir: Path = OUTPUT_DIR, limit: int = 100) -> list[dict
                 "source": {"source_id": source.get("source_id"),
                            "filename": source.get("filename")} if source else None,
                 "preview_available": bool(manifest.get("preview", {}).get("available")),
-                "related_documents": manifest.get("related_documents", []),
+                "related_documents": related_documents,
             })
             if len(documents) >= max(1, min(limit, 500)):
                 break
         except (OSError, ValueError, TypeError, AttributeError):
             logging.getLogger(__name__).warning("Skipping unreadable RKS manifest: %s", path)
     return documents
+
+
+def _related_documents(artifact_id: str, output_dir: Path) -> list[dict]:
+    """Read only tender files that still match the recorded content hash."""
+    sidecar = output_dir / artifact_id / "related_documents.json"
+    if not sidecar.is_file():
+        return []
+    tender_dir = output_dir.parent.resolve()
+    try:
+        entries = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(entries, list):
+            return []
+        result = []
+        for entry in entries:
+            filename = entry.get("filename") if isinstance(entry, dict) else None
+            if not isinstance(filename, str) or Path(filename).name != filename or not filename.lower().endswith(".docx"):
+                continue
+            path = tender_dir / filename
+            if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == entry.get("sha256"):
+                result.append({"filename": filename, "created_at": entry.get("created_at"), "path": path})
+        return result
+    except (OSError, ValueError, TypeError):
+        logging.getLogger(__name__).warning("Cannot read related documents for RKS %s", artifact_id)
+        return []
+
+
+def record_related_tender(artifact_id: str, filename: str, output_dir: Path = OUTPUT_DIR) -> None:
+    """Link a completed tender to the RKS without changing its finalized manifest."""
+    manifest = get_document(artifact_id, output_dir)
+    if manifest.get("status") == "gagal" or Path(filename).name != filename or not filename.lower().endswith(".docx"):
+        raise ValueError("Identitas RKS atau nama dokumen tender tidak valid.")
+    path = output_dir.parent / filename
+    if not path.is_file():
+        raise FileNotFoundError("Dokumen tender belum tersedia di folder output.")
+    sidecar = output_dir / artifact_id / "related_documents.json"
+    entries = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else []
+    if not isinstance(entries, list):
+        entries = []
+    entries = [entry for entry in entries if isinstance(entry, dict) and entry.get("filename") != filename]
+    entries.append({"filename": filename, "created_at": _created_at(),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    temp = sidecar.with_name(f"related_documents.{uuid4().hex}.tmp")
+    try:
+        temp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(sidecar)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def artifact_file(artifact_id: str, kind: str, output_dir: Path = OUTPUT_DIR) -> Path:

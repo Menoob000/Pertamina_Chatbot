@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 import streamlit as st
-from tools.rks.service import artifact_file, get_document, list_documents
+from tools.rks.service import artifact_file, get_document, list_documents, record_related_tender
 from tools.rks.chat import payload as parse_chat_payload
 from tools.tender.preview import prepare_tender_preview, preview_key
 
@@ -577,6 +577,11 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
                         if res.status_code == 200:
                             gen_result = res.json()
                             st.session_state.last_generated_tender = gen_result
+                            if generated_rks_docx and use_active_rks:
+                                try:
+                                    record_related_tender(generated_rks_id, gen_result["filename"])
+                                except (OSError, ValueError, KeyError) as exc:
+                                    st.warning(f"Dokumen tender berhasil dibuat, tetapi tautan ke Gudang RKS belum tersimpan: {exc}")
                             st.success(f"🎉 {gen_result.get('message', 'Dokumen Tender berhasil dibuat!')}")
                             _render_tender_download(gen_result, render_download_card_fn)
                         else:
