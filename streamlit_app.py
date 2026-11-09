@@ -286,10 +286,16 @@ st.html(
 # ---------------------------------------------------------------------------
 # Session State Initialization
 # ---------------------------------------------------------------------------
-owner_token = st.query_params.get("chat_owner", "")
-if not re.fullmatch(r"[0-9a-f]{32}", owner_token):
-    owner_token = uuid.uuid4().hex
-    st.query_params["chat_owner"] = owner_token
+CHAT_IDENTITY_MODE = "single"  # Ganti ke "multi" untuk identitas per pengguna; token URL bukan pengganti login pada akses publik.
+if CHAT_IDENTITY_MODE == "single":
+    owner_token = "local_single_user"
+    if "chat_owner" in st.query_params:
+        del st.query_params["chat_owner"]
+else:
+    owner_token = st.query_params.get("chat_owner", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        owner_token = uuid.uuid4().hex
+        st.query_params["chat_owner"] = owner_token
 if st.session_state.get("_chat_owner_token") not in (None, owner_token):
     for key in ("threads", "current_thread_id", "_chat_store_synced_owner",
                 "_chat_migrated_threads"):
@@ -297,7 +303,7 @@ if st.session_state.get("_chat_owner_token") not in (None, owner_token):
 st.session_state["_chat_owner_token"] = owner_token
 
 try:
-    chat_store = ConversationStore(owner_token)
+    chat_store = ConversationStore(owner_token, single_user=CHAT_IDENTITY_MODE == "single")
     chat_store.initialize()
 except Exception as exc:
     chat_store = None
@@ -714,7 +720,8 @@ if st.session_state.get("show_rks_page"):
     st.stop()
 
 if st.session_state.get("nav_choice") == "tender":
-    render_tender_generator_page(render_docx_download_card)
+    render_tender_generator_page(render_docx_download_card, chat_store=chat_store,
+                                 thread_id=current_thread_id)
     st.stop()
 
 if app is None:

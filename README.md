@@ -36,11 +36,20 @@ LANGSMITH_PROJECT="Pertamina_Chatbot"
 
 Riwayat percakapan Streamlit disimpan di PostgreSQL yang sama dengan knowledge base
 (`PGVECTOR_HOST`, `PGVECTOR_PORT`, `PGVECTOR_DB`, `PGVECTOR_USER`, dan
-`PGVECTOR_PASSWORD`). Saat aplikasi dibuka, tabel `chat_threads` dan
-`chat_messages` dibuat otomatis jika belum ada. URL aplikasi menyimpan token
-acak `chat_owner` dan identitas `chat_thread` agar percakapan yang sama dapat
-dibuka kembali setelah refresh. Simpan URL tersebut dan jangan bagikan kepada
-orang lain; token URL belum menggantikan autentikasi pengguna.
+`PGVECTOR_PASSWORD`). Tabel `chat_users`, `chat_threads`, `chat_messages`, dan
+`tender_drafts` dibuat otomatis saat aplikasi dibuka. Hasil ekstraksi tender dan
+isian formulir disimpan per percakapan agar dapat dibuka kembali setelah refresh.
+Mode bawaan memakai satu identitas lokal:
+riwayat lama dari token URL mana pun terlihat pada port 8501 maupun 8502 tanpa
+memindahkan atau menghapus isi database.
+
+Untuk memisahkan riwayat per pengguna, ubah `CHAT_IDENTITY_MODE` pada
+`streamlit_app.py` dari `single` menjadi `multi`. Pada mode itu, token
+`chat_owner` di URL menjadi identitas pengguna anonim dan tercatat di
+`chat_users`. Token URL belum merupakan autentikasi; tambahkan login sebelum
+memberi akses kepada beberapa pengguna melalui jaringan. Riwayat yang dibuat
+dalam mode satu identitas tetap tersimpan di database dan memerlukan penentuan
+pemilik sebelum dialihkan ke akun pengguna tertentu.
 
 Aplikasi ini menggunakan arsitektur modular yang memisahkan **Database**, **FastAPI Backend**, dan **Streamlit Frontend**.
 

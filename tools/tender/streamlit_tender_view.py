@@ -7,13 +7,16 @@ Directly extracts and displays key procurement information without tedious manua
 import os
 import io
 import html
+import json
 import requests
 import pymupdf
+import re
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import streamlit as st
-from tools.rks.service import artifact_file, get_document
+from tools.rks.service import artifact_file, get_document, list_documents
+from tools.rks.chat import payload as parse_chat_payload
 from tools.tender.preview import prepare_tender_preview, preview_key
 
 API_HOST = os.getenv("FASTAPI_HOST", "127.0.0.1")
@@ -126,8 +129,103 @@ def _format_rupiah(val: float) -> str:
         return f"Rp{val}"
 
 
-def render_tender_generator_page(render_download_card_fn):
+_TENDER_DRAFT_KEYS = (
+    "extraction_done", "tender_rks_artifact_id", "tf_nama_pengadaan",
+    "tf_resiko_csms", "tf_prime_cost", "tf_total_kr", "tf_context_summary",
+    "tf_boq_items", "tf_sources", "tf_issues", "inp_final_outname",
+    "_tender_suggested_filename",
+)
+
+
+def _tender_draft_snapshot() -> dict:
+    return {
+        "state": {key: st.session_state.get(key) for key in _TENDER_DRAFT_KEYS
+                  if key in st.session_state},
+        "fields": {key: value for key, value in st.session_state.items()
+                   if key.startswith("tender_field_")},
+    }
+
+
+def _restore_tender_draft(draft: dict) -> None:
+    for key, value in (draft.get("state") or {}).items():
+        if key in _TENDER_DRAFT_KEYS:
+            st.session_state[key] = value
+    for key, value in (draft.get("fields") or {}).items():
+        if key.startswith("tender_field_"):
+            st.session_state[key] = value
+
+
+def _latest_chat_rks(store, thread_id: str) -> str | None:
+    for message in reversed(store.load_messages(thread_id)):
+        if getattr(message, "type", None) != "tool" or getattr(message, "name", "") != "create_rks_document":
+            continue
+        artifact_id = parse_chat_payload(message.content).get("artifact_id")
+        if isinstance(artifact_id, str) and re.fullmatch(r"[0-9a-f]{32}", artifact_id):
+            try:
+                artifact_file(artifact_id, "docx")
+            except (OSError, ValueError, KeyError):
+                continue
+            return artifact_id
+    return None
+
+
+def _persist_tender_draft(store, thread_id: str) -> None:
+    if not store or not thread_id or not st.session_state.get("extraction_done"):
+        return
+    draft = _tender_draft_snapshot()
+    signature = json.dumps(draft, ensure_ascii=False, sort_keys=True)
+    if st.session_state.get("_tender_saved_signature") != signature:
+        store.save_tender_draft(thread_id, draft)
+        st.session_state["_tender_saved_signature"] = signature
+
+
+def render_tender_generator_page(render_download_card_fn, chat_store=None, thread_id=None):
     """Renders the simplified and automated Tender Document Generator UI."""
+    if thread_id and st.session_state.get("_tender_active_thread") != thread_id:
+        previous_thread = st.session_state.get("_tender_active_thread")
+        pending_rks = st.session_state.get("tender_rks_pending_artifact_id")
+        selected_rks = st.session_state.get("tender_rks_artifact_id")
+        if previous_thread is not None:
+            for key in (*_TENDER_DRAFT_KEYS, "last_generated_tender", "last_exported_docx",
+                        "tender_rks_pending_artifact_id",
+                        "_tender_saved_signature"):
+                st.session_state.pop(key, None)
+            for key in list(st.session_state):
+                if key.startswith("tender_field_"):
+                    st.session_state.pop(key, None)
+            if not pending_rks and "tender_rks" in st.query_params:
+                del st.query_params["tender_rks"]
+        if pending_rks:
+            st.session_state["tender_rks_artifact_id"] = selected_rks
+            st.session_state["tender_rks_pending_artifact_id"] = pending_rks
+        elif not st.session_state.get("extraction_done"):
+            try:
+                saved_draft = chat_store.load_tender_draft(thread_id) if chat_store else None
+                requested_rks = st.query_params.get("tender_rks", "")
+                if requested_rks and not re.fullmatch(r"[0-9a-f]{32}", requested_rks):
+                    requested_rks = ""
+                saved_rks = ((saved_draft.get("state") or {}).get("tender_rks_artifact_id")
+                             if saved_draft else None)
+                if requested_rks and requested_rks != saved_rks:
+                    st.session_state["tender_rks_artifact_id"] = requested_rks
+                    st.session_state["tender_rks_pending_artifact_id"] = requested_rks
+                elif saved_draft:
+                    _restore_tender_draft(saved_draft)
+                    st.session_state["_tender_saved_signature"] = json.dumps(
+                        saved_draft, ensure_ascii=False, sort_keys=True)
+                    if not st.session_state.get("extraction_done") and saved_rks:
+                        st.session_state["tender_rks_pending_artifact_id"] = saved_rks
+                elif not st.session_state.get("tender_rks_artifact_id"):
+                    recent_rks = requested_rks
+                    if not recent_rks and chat_store:
+                        recent_rks = _latest_chat_rks(chat_store, thread_id)
+                    if recent_rks:
+                        st.session_state["tender_rks_artifact_id"] = recent_rks
+                        st.session_state["tender_rks_pending_artifact_id"] = recent_rks
+            except Exception as exc:
+                st.warning(f"Draf tender belum dapat dipulihkan: {exc}")
+        st.session_state["_tender_active_thread"] = thread_id
+
     st.markdown(
         """
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
@@ -184,6 +282,31 @@ def render_tender_generator_page(render_download_card_fn):
                            st.session_state.get("last_exported_docx"))
         use_active_rks = False
 
+        if not active_rks_docx:
+            recent_documents = list_documents(limit=20)
+            if recent_documents:
+                document_options = {item["artifact_id"]: item for item in recent_documents}
+                selected_rks = st.selectbox(
+                    "Pilih RKS hasil generator yang tersimpan",
+                    [""] + list(document_options),
+                    format_func=lambda item: (
+                        f"{document_options[item]['title']} ({item[:8]})" if item else "Pilih dokumen"
+                    ),
+                    key="tender_saved_rks_choice",
+                )
+                if st.button("Gunakan RKS ini", disabled=not selected_rks,
+                             key="tender_use_saved_rks"):
+                    for key in (*_TENDER_DRAFT_KEYS, "last_generated_tender",
+                                "_tender_saved_signature"):
+                        st.session_state.pop(key, None)
+                    for key in list(st.session_state):
+                        if key.startswith("tender_field_"):
+                            st.session_state.pop(key, None)
+                    st.session_state["tender_rks_artifact_id"] = selected_rks
+                    st.session_state["tender_rks_pending_artifact_id"] = selected_rks
+                    st.query_params["tender_rks"] = selected_rks
+                    st.rerun()
+
         if active_rks_docx and os.path.exists(active_rks_docx):
             if generated_rks_docx is None:
                 st.success(f"✅ RKS Aktif dari Chat: `{os.path.basename(active_rks_docx)}`")
@@ -213,6 +336,14 @@ def render_tender_generator_page(render_download_card_fn):
     # Trigger Context Extraction
     btn_extract = st.button("🔍 Analisa & Ekstrak Informasi dari Dokumen", type="secondary", use_container_width=True)
     pending_rks_id = st.session_state.pop("tender_rks_pending_artifact_id", None)
+    if pending_rks_id and chat_store and thread_id:
+        try:
+            chat_store.save_tender_draft(thread_id, {
+                "state": {"extraction_done": False, "tender_rks_artifact_id": pending_rks_id},
+                "fields": {},
+            })
+        except Exception as exc:
+            st.warning(f"Pilihan RKS belum tersimpan: {exc}")
     auto_extract = bool(pending_rks_id and pending_rks_id == generated_rks_id and
                         generated_rks_docx and use_active_rks)
 
@@ -252,7 +383,8 @@ def render_tender_generator_page(render_download_card_fn):
                             if key.startswith("tender_field_"):
                                 st.session_state.pop(key, None)
                         for key in ("tf_nama_pengadaan", "tf_resiko_csms", "tf_prime_cost", "tf_total_kr",
-                                    "tf_context_summary", "tf_boq_items", "tf_sources", "tf_issues"):
+                                    "tf_context_summary", "tf_boq_items", "tf_sources", "tf_issues",
+                                    "inp_final_outname", "_tender_suggested_filename", "_tender_saved_signature"):
                             st.session_state.pop(key, None)
                         st.session_state.tf_nama_pengadaan = extracted.get("nama_pengadaan") or ""
                         st.session_state.tf_resiko_csms = extracted.get("resiko_csms") or ""
@@ -265,6 +397,10 @@ def render_tender_generator_page(render_download_card_fn):
                         st.session_state.pop("last_generated_tender", None)
 
                         st.session_state.extraction_done = True
+                        try:
+                            _persist_tender_draft(chat_store, thread_id)
+                        except Exception as exc:
+                            st.warning(f"Hasil ekstraksi belum tersimpan: {exc}")
                         st.success("Pembacaan dokumen selesai. Periksa hasil dan lengkapi data yang belum ditemukan.")
                         st.rerun()
                     else:
@@ -287,6 +423,13 @@ def render_tender_generator_page(render_download_card_fn):
         info_context = st.session_state.get("tf_context_summary") or ""
         info_boq_items = st.session_state.get("tf_boq_items") or []
         sources = st.session_state.get("tf_sources") or {}
+        st.session_state.setdefault("tender_field_nama_pengadaan", info_nama)
+        st.session_state.setdefault("tender_field_resiko_csms", info_csms if info_csms in
+                                    ("Tinggi", "Sedang", "Rendah") else "")
+        st.session_state.setdefault("tender_field_prime_cost", info_prime or 0.0)
+        st.session_state.setdefault("tender_field_total_dengan_kr", info_kr or 0.0)
+        st.session_state.setdefault("tender_field_tkdn_minimal", 0.0)
+        form_nama = st.session_state.get("tender_field_nama_pengadaan", info_nama)
         for issue in st.session_state.get("tf_issues") or []:
             st.warning(issue)
 
@@ -297,11 +440,13 @@ def render_tender_generator_page(render_download_card_fn):
                 f"""
                 <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; padding:12px 16px; margin-bottom:8px;">
                     <span style="font-size:0.75rem; color:#64748B; font-weight:700; text-transform:uppercase;">📌 Nama Pengadaan</span>
-                    <div style="font-size:1.05rem; font-weight:700; color:#0F172A; margin-top:4px;">{html.escape(info_nama or 'Belum ditemukan')}</div>
+                    <div style="font-size:1.05rem; font-weight:700; color:#0F172A; margin-top:4px;">{html.escape(form_nama or 'Belum ditemukan')}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+            with st.popover("✏️ Edit nama pengadaan"):
+                form_nama = st.text_input("Nama pengadaan", key="tender_field_nama_pengadaan")
         with m2:
             badge_color = "#DC2626" if info_csms == "Tinggi" else ("#D97706" if info_csms == "Sedang" else "#059669")
             badge_bg = "#FEF2F2" if info_csms == "Tinggi" else ("#FFFBEB" if info_csms == "Sedang" else "#ECFDF5")
@@ -342,25 +487,23 @@ def render_tender_generator_page(render_download_card_fn):
             with col_d2:
                 st.markdown("**Data pengadaan lainnya:** lengkapi pada formulir di bawah sesuai dokumen resmi.")
 
-        st.markdown("#### Lengkapi dan periksa data tender")
-        st.caption("Nilai yang terisi otomatis berasal dari dokumen sumber. Kosongkan atau ubah bila hasil baca kurang tepat.")
-        basic_left, basic_right = st.columns(2)
-        with basic_left:
-            form_nama = st.text_input("Nama pengadaan", value=info_nama, key="tender_field_nama_pengadaan")
-            form_csms = st.selectbox("Risiko CSMS", ["", "Tinggi", "Sedang", "Rendah"],
-                                     index=["", "Tinggi", "Sedang", "Rendah"].index(info_csms) if info_csms in ("Tinggi", "Sedang", "Rendah") else 0,
-                                     format_func=lambda value: value or "Pilih risiko", key="tender_field_resiko_csms")
-            form_prime = st.number_input("HPS Prime Cost (Rp)", min_value=0.0,
-                                         value=info_prime or 0.0, step=1000.0, key="tender_field_prime_cost")
-            form_total = st.number_input("Total HPS termasuk K&R (Rp)", min_value=0.0,
-                                         value=info_kr or 0.0, step=1000.0, key="tender_field_total_dengan_kr")
-        with basic_right:
-            form_nomor = st.text_input("Nomor tender", key="tender_field_nomor_tender")
-            form_tanggal = st.text_input("Tanggal dokumen", key="tender_field_tanggal")
-            form_tkdn = st.number_input("Target TKDN minimum (%)", min_value=0.0, max_value=100.0,
-                                        value=0.0, key="tender_field_tkdn_minimal")
-            form_metode = st.text_input("Metode pemenuhan", key="tender_field_metode_pemenuhan")
-            form_kontrak = st.text_input("Jenis kontrak", key="tender_field_jenis_kontrak")
+        with st.expander("Lengkapi dan periksa data tender", expanded=False):
+            st.caption("Nilai yang terisi otomatis berasal dari dokumen sumber. Kosongkan atau ubah bila hasil baca kurang tepat.")
+            basic_left, basic_right = st.columns(2)
+            with basic_left:
+                form_csms = st.selectbox("Risiko CSMS", ["", "Tinggi", "Sedang", "Rendah"],
+                                         format_func=lambda value: value or "Pilih risiko", key="tender_field_resiko_csms")
+                form_prime = st.number_input("HPS Prime Cost (Rp)", min_value=0.0,
+                                             step=1000.0, key="tender_field_prime_cost")
+                form_total = st.number_input("Total HPS termasuk K&R (Rp)", min_value=0.0,
+                                             step=1000.0, key="tender_field_total_dengan_kr")
+            with basic_right:
+                form_nomor = st.text_input("Nomor tender", key="tender_field_nomor_tender")
+                form_tanggal = st.text_input("Tanggal dokumen", key="tender_field_tanggal")
+                form_tkdn = st.number_input("Target TKDN minimum (%)", min_value=0.0, max_value=100.0,
+                                            key="tender_field_tkdn_minimal")
+                form_metode = st.text_input("Metode pemenuhan", key="tender_field_metode_pemenuhan")
+                form_kontrak = st.text_input("Jenis kontrak", key="tender_field_jenis_kontrak")
         with st.expander("Pejabat dan jadwal pengadaan", expanded=True):
             text_fields = {
                 "pejabat_procurement_nama": "Nama pejabat procurement",
@@ -377,12 +520,20 @@ def render_tender_generator_page(render_download_card_fn):
                             for field, label in text_fields.items()}
 
         # Optional Output Filename
-        clean_suggest = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in info_nama)[:40].strip()
+        clean_suggest = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in form_nama)[:40].strip()
+        suggested_filename = f"Dokumen_Tender_{clean_suggest}.docx"
+        previous_suggestion = st.session_state.get("_tender_suggested_filename")
+        if st.session_state.get("inp_final_outname") in (None, previous_suggestion):
+            st.session_state["inp_final_outname"] = suggested_filename
+        st.session_state["_tender_suggested_filename"] = suggested_filename
         out_filename = st.text_input(
             "Nama File Hasil (.docx)",
-            value=f"Dokumen_Tender_{clean_suggest}.docx",
             key="inp_final_outname"
         )
+        try:
+            _persist_tender_draft(chat_store, thread_id)
+        except Exception as exc:
+            st.warning(f"Perubahan draf tender belum tersimpan: {exc}")
 
         # ── Section 3: Generate Action ──
         st.write("")

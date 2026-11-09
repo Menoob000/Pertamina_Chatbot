@@ -11,8 +11,9 @@ from langchain_core.messages import messages_from_dict, messages_to_dict
 
 
 class ConversationStore:
-    def __init__(self, owner_token: str):
+    def __init__(self, owner_token: str, single_user: bool = False):
         self.owner_token = owner_token
+        self.single_user = single_user
 
     def _connect(self):
         return psycopg.connect(
@@ -26,6 +27,14 @@ class ConversationStore:
 
     def initialize(self):
         with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_users (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_threads (
                     id TEXT PRIMARY KEY,
@@ -44,16 +53,32 @@ class ConversationStore:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS tender_drafts (
+                    thread_id TEXT PRIMARY KEY REFERENCES chat_threads(id) ON DELETE CASCADE,
+                    payload JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS chat_threads_owner_updated_idx
                 ON chat_threads (owner_token, updated_at DESC)
             """)
+            conn.execute("""
+                INSERT INTO chat_users (id, display_name)
+                SELECT DISTINCT owner_token, 'Pengguna lama' FROM chat_threads
+                ON CONFLICT (id) DO NOTHING
+            """)
+            conn.execute("""
+                INSERT INTO chat_users (id, display_name) VALUES (%s, %s)
+                ON CONFLICT (id) DO UPDATE SET last_seen_at = now()
+            """, (self.owner_token, "Pengguna lokal" if self.single_user else "Pengguna anonim"))
 
     def list_threads(self) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT id, title, created_at FROM chat_threads
-                WHERE owner_token = %s ORDER BY updated_at DESC
-            """, (self.owner_token,)).fetchall()
+                WHERE (%s OR owner_token = %s) ORDER BY updated_at DESC
+            """, (self.single_user, self.owner_token)).fetchall()
         jakarta_tz = timezone(timedelta(hours=7))
         return [{"id": thread_id, "title": title,
                  "created_at": created_at.astimezone(jakarta_tz).strftime("%H:%M"),
@@ -74,30 +99,30 @@ class ConversationStore:
             """, (thread_id, self.owner_token, title))
             owner = conn.execute("SELECT owner_token FROM chat_threads WHERE id = %s",
                                  (thread_id,)).fetchone()
-            if not owner or owner[0] != self.owner_token:
+            if not owner or (not self.single_user and owner[0] != self.owner_token):
                 raise ValueError("Identitas percakapan telah digunakan oleh sesi lain.")
 
     def rename_thread(self, thread_id: str, title: str):
         with self._connect() as conn:
             conn.execute("""
                 UPDATE chat_threads SET title = %s, updated_at = now()
-                WHERE id = %s AND owner_token = %s
-            """, (title, thread_id, self.owner_token))
+                WHERE id = %s AND (%s OR owner_token = %s)
+            """, (title, thread_id, self.single_user, self.owner_token))
 
     def delete_thread(self, thread_id: str):
         with self._connect() as conn:
             conn.execute("""
-                DELETE FROM chat_threads WHERE id = %s AND owner_token = %s
-            """, (thread_id, self.owner_token))
+                DELETE FROM chat_threads WHERE id = %s AND (%s OR owner_token = %s)
+            """, (thread_id, self.single_user, self.owner_token))
 
     def load_messages(self, thread_id: str):
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT m.payload FROM chat_messages AS m
                 JOIN chat_threads AS t ON t.id = m.thread_id
-                WHERE t.id = %s AND t.owner_token = %s
+                WHERE t.id = %s AND (%s OR t.owner_token = %s)
                 ORDER BY m.position
-            """, (thread_id, self.owner_token)).fetchall()
+            """, (thread_id, self.single_user, self.owner_token)).fetchall()
         return messages_from_dict([row[0] for row in rows])
 
     def save_messages(self, thread_id: str, messages):
@@ -107,8 +132,8 @@ class ConversationStore:
                     for item in messages_to_dict(messages)]
         with self._connect() as conn:
             exists = conn.execute("""
-                SELECT 1 FROM chat_threads WHERE id = %s AND owner_token = %s FOR UPDATE
-            """, (thread_id, self.owner_token)).fetchone()
+                SELECT 1 FROM chat_threads WHERE id = %s AND (%s OR owner_token = %s) FOR UPDATE
+            """, (thread_id, self.single_user, self.owner_token)).fetchone()
             if not exists:
                 raise ValueError("Percakapan tidak ditemukan untuk sesi ini.")
             conn.execute("DELETE FROM chat_messages WHERE thread_id = %s", (thread_id,))
@@ -119,3 +144,26 @@ class ConversationStore:
                         VALUES (%s, %s, %s)
                     """, [(thread_id, index, payload) for index, payload in enumerate(payloads)])
             conn.execute("UPDATE chat_threads SET updated_at = now() WHERE id = %s", (thread_id,))
+
+    def load_tender_draft(self, thread_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT d.payload FROM tender_drafts AS d
+                JOIN chat_threads AS t ON t.id = d.thread_id
+                WHERE d.thread_id = %s AND (%s OR t.owner_token = %s)
+            """, (thread_id, self.single_user, self.owner_token)).fetchone()
+        return row[0] if row else None
+
+    def save_tender_draft(self, thread_id: str, payload: dict) -> None:
+        with self._connect() as conn:
+            owner = conn.execute("""
+                SELECT 1 FROM chat_threads
+                WHERE id = %s AND (%s OR owner_token = %s)
+            """, (thread_id, self.single_user, self.owner_token)).fetchone()
+            if not owner:
+                raise ValueError("Percakapan tidak ditemukan untuk menyimpan draf tender.")
+            conn.execute("""
+                INSERT INTO tender_drafts (thread_id, payload) VALUES (%s, %s)
+                ON CONFLICT (thread_id) DO UPDATE
+                SET payload = EXCLUDED.payload, updated_at = now()
+            """, (thread_id, Jsonb(payload)))

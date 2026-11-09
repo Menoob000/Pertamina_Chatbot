@@ -13,6 +13,7 @@ def _continue_to_tender(artifact_id: str) -> None:
     """Select a finalized RKS before the next Streamlit rerun."""
     st.session_state["tender_rks_artifact_id"] = artifact_id
     st.session_state["tender_rks_pending_artifact_id"] = artifact_id
+    st.query_params["tender_rks"] = artifact_id
     st.session_state["show_rks_page"] = False
     st.session_state["nav_choice"] = "tender"
     st.session_state["app_nav_radio_menu"] = "📑 Dokumen Tender Generator"
