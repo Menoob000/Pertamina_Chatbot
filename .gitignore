@@ -225,6 +225,7 @@ frontend/dist/
 
 # Generated RKS artifacts and office renderer profiles
 output/rks/
+output/tender_previews/
 tmp/rks-qa*/
 tmp/rks-chat-preview/
 tmp/rks-runtime/

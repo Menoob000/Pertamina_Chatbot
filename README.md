@@ -34,6 +34,14 @@ LANGSMITH_PROJECT="Pertamina_Chatbot"
 
 ## 🛠️ Cara Menjalankan Aplikasi
 
+Riwayat percakapan Streamlit disimpan di PostgreSQL yang sama dengan knowledge base
+(`PGVECTOR_HOST`, `PGVECTOR_PORT`, `PGVECTOR_DB`, `PGVECTOR_USER`, dan
+`PGVECTOR_PASSWORD`). Saat aplikasi dibuka, tabel `chat_threads` dan
+`chat_messages` dibuat otomatis jika belum ada. URL aplikasi menyimpan token
+acak `chat_owner` dan identitas `chat_thread` agar percakapan yang sama dapat
+dibuka kembali setelah refresh. Simpan URL tersebut dan jangan bagikan kepada
+orang lain; token URL belum menggantikan autentikasi pengguna.
+
 Aplikasi ini menggunakan arsitektur modular yang memisahkan **Database**, **FastAPI Backend**, dan **Streamlit Frontend**.
 
 ### 1. Jalankan Database PostgreSQL (`pgvector`)

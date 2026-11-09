@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field
 import config
 
 from tools.rks.catalog import public_source
-from tools.rks.service import create_document, get_document, artifact_file, search_sources, list_sources
+from tools.rks.service import (create_document, get_document, artifact_file,
+                               search_sources, list_sources, list_documents)
 from tools.rks.retrieval import search_evidence
 
 router = APIRouter(prefix="/api/rks", tags=["RKS"])
@@ -47,6 +48,11 @@ def search(payload: RKSSearchRequest):
 @router.post("/generate")
 def generate(payload: RKSRequest):
     return create_document(payload.query, payload.source_id)
+
+
+@router.get("/generated")
+def generated(limit: int = Query(default=100, ge=1, le=500)):
+    return {"documents": list_documents(limit=limit)}
 
 
 @router.get("/{artifact_id}")

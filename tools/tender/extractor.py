@@ -8,6 +8,7 @@ Supports:
 import io
 import re
 import os
+import csv
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
@@ -25,7 +26,9 @@ def extract_rks_info(file_input: Union[str, Path, bytes, io.BytesIO], filename: 
     """
     text_content = ""
     title = ""
-    csms = "Tinggi"
+    csms = None
+    sources = {}
+    issues = []
     scope_snippets = []
 
     # 1. Read content
@@ -86,20 +89,22 @@ def extract_rks_info(file_input: Union[str, Path, bytes, io.BytesIO], filename: 
         if 15 < len(extracted) < 250:
             title = extracted
 
-    if not title and filename:
-        clean_fn = filename.replace(".pdf", "").replace(".docx", "").replace("RKS-", "").replace("RKS+", "").strip()
-        title = clean_fn
-
-    if not title:
-        title = "PENGADAAN JASA / BARANG"
+    if title:
+        sources["nama_pengadaan"] = {"filename": filename, "location": "teks RKS"}
+    else:
+        issues.append("Nama pengadaan tidak ditemukan secara pasti dalam RKS; isi manual.")
 
     # 3. Extract CSMS Risk Level
-    if re.search(r'csms.*?(middle|sedang)', text_clean, re.IGNORECASE):
-        csms = "Sedang"
-    elif re.search(r'csms.*?(low|rendah)', text_clean, re.IGNORECASE):
-        csms = "Rendah"
+    risk_match = re.search(r'(?:RISIKO|RESIKO)\s*(?:PEKERJAAN)?\s*\(?ASPEK\s*CSMS\)?\s*[:\-]?\s*(HIGH|MIDDLE|LOW|TINGGI|SEDANG|RENDAH)\b', text_clean, re.I)
+    if not risk_match:
+        risk_section = re.search(r'(?:RISIKO|RESIKO)\s*(?:PEKERJAAN)?\s*\(?ASPEK\s*CSMS\)?[^\n]{0,100}', text_clean, re.I)
+        if risk_section:
+            risk_match = re.search(r'[☑☒✓✔]\s*(HIGH|MIDDLE|LOW|TINGGI|SEDANG|RENDAH)\b', risk_section.group(0), re.I)
+    if risk_match:
+        csms = {"HIGH": "Tinggi", "MIDDLE": "Sedang", "LOW": "Rendah", "TINGGI": "Tinggi", "SEDANG": "Sedang", "RENDAH": "Rendah"}[risk_match.group(1).upper()]
+        sources["resiko_csms"] = {"filename": filename, "location": "teks RKS", "label": risk_match.group(0)}
     else:
-        csms = "Tinggi"
+        issues.append("Kategori CSMS tidak terbaca dengan pasti; isi manual.")
 
     # 4. Extract Scope of Work snippet
     scope_match = re.search(
@@ -111,8 +116,8 @@ def extract_rks_info(file_input: Union[str, Path, bytes, io.BytesIO], filename: 
 
     summary_text = (
         f"Dokumen RKS: {filename}\n"
-        f"Judul: {title}\n"
-        f"CSMS: {csms}\n"
+        f"Judul: {title or 'belum ditemukan'}\n"
+        f"CSMS: {csms or 'belum ditemukan'}\n"
         f"Lingkup Pekerjaan Utama:\n" + ("\n".join(scope_snippets) if scope_snippets else text_clean[:1200])
     )
 
@@ -120,89 +125,139 @@ def extract_rks_info(file_input: Union[str, Path, bytes, io.BytesIO], filename: 
         "nama_pengadaan": title,
         "resiko_csms": csms,
         "context_summary": summary_text[:3000],
-        "full_text_snippet": text_clean[:4000]
+        "full_text_snippet": text_clean[:4000],
+        "sources": sources,
+        "issues": issues,
     }
 
 
 def extract_boq_info(file_input: Union[str, Path, bytes, io.BytesIO], filename: str = "") -> Dict[str, Any]:
-    """
-    Extracts key financial & item information from a BOQ document:
-    - Prime Cost & Total dengan K&R (HPS)
-    - List of structured items for Lampiran 5B
-    - Context summary for LLM prompt
-    """
-    prime_cost = 0.0
-    total_kr = 0.0
-    items: List[Dict[str, Any]] = []
-    summary_lines = []
+    """Read explicit BOQ totals and all structured item rows with provenance."""
+    if isinstance(file_input, (str, Path)):
+        path = Path(file_input)
+        filename = filename or path.name
+        raw = path.read_bytes()
+    else:
+        raw = file_input.getvalue() if isinstance(file_input, io.BytesIO) else file_input
+    extension = Path(filename).suffix.lower()
+    result = {"prime_cost": None, "total_dengan_kr": None, "items": [],
+              "sources": {}, "issues": [], "summary": ""}
 
-    # Handle Excel (.xlsx, .xls)
-    is_excel = filename.lower().endswith((".xlsx", ".xls"))
-    is_csv = filename.lower().endswith(".csv")
+    def money(value):
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value) if value >= 0 else None
+        raw_value = str(value).strip()
+        if "%" in raw_value or not re.search(r"\d", raw_value):
+            return None
+        value = re.sub(r"[^\d,.-]", "", raw_value)
+        if not value or value.startswith("-"):
+            return None
+        decimal = None
+        if "," in value and "." in value:
+            decimal = "," if value.rfind(",") > value.rfind(".") else "."
+        elif "," in value and len(value.rsplit(",", 1)[-1]) in (1, 2):
+            decimal = ","
+        elif "." in value and len(value.rsplit(".", 1)[-1]) in (1, 2):
+            decimal = "."
+        normalized = value.replace(",", "").replace(".", "") if decimal is None else (
+            value.replace(".", "").replace(",", ".") if decimal == "," else value.replace(",", ""))
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+
+    def scan_rows(rows, location):
+        header = None
+        columns = {}
+        for number, row in enumerate(rows, 1):
+            cells = [str(cell).strip() if cell is not None else "" for cell in row]
+            if not any(cells):
+                continue
+            labels = " ".join(cells[:-1]).lower() if len(cells) > 1 else cells[0].lower()
+            amounts = [(index, money(cell)) for index, cell in enumerate(cells)]
+            amounts = [(index, amount) for index, amount in amounts if amount is not None]
+            if amounts and re.search(r"\b(prime\s*cost|sub\s*total|subtotal|hps|grand\s*total|total)\b", labels):
+                field = ("prime_cost" if re.search(r"prime\s*cost|sub\s*total|subtotal", labels)
+                         else "total_dengan_kr" if re.search(r"k\s*&\s*r|keuntungan\s*(?:dan|&)\s*risiko", labels)
+                         else None)
+                # Only accept a numeric amount to the right of the total label.
+                label_positions = [index for index, cell in enumerate(cells)
+                                   if re.search(r"\b(prime\s*cost|sub\s*total|subtotal|hps|grand\s*total|total)\b", cell, re.I)]
+                amounts = [(index, amount) for index, amount in amounts
+                           if index > min(label_positions or [len(cells)])]
+                if amounts and field:
+                    amount = amounts[-1][1]
+                    if amount > 0:
+                        result[field] = amount
+                        result["sources"][field] = {"filename": filename, "location": f"{location}, baris {number}",
+                                                    "label": labels.strip(), "value": amount}
+                elif amounts and not field and not any("Total BOQ belum jelas" in issue for issue in result["issues"]):
+                    result["issues"].append("Total BOQ belum jelas termasuk K&R; periksa dan isi total HPS manual.")
+                continue
+            if any(re.search(r"\b(uraian|deskripsi|keterangan|nama pekerjaan)\b", cell, re.I)
+                   for cell in cells) and any(re.search(r"\b(vol(?:ume)?|qty|kuantitas|satuan)\b", cell, re.I)
+                                         for cell in cells):
+                header = number
+                columns = {}
+                for index, cell in enumerate(cells):
+                    if re.search(r"\b(uraian|deskripsi|keterangan|nama pekerjaan)\b", cell, re.I):
+                        columns["uraian"] = index
+                    elif re.search(r"\b(vol(?:ume)?|qty|kuantitas)\b", cell, re.I):
+                        columns["volume"] = index
+                    elif re.search(r"\b(satuan|unit)\b", cell, re.I):
+                        columns["satuan"] = index
+                continue
+            if header and number > header and "uraian" in columns:
+                def cell_at(field):
+                    index = columns.get(field)
+                    return cells[index] if index is not None and index < len(cells) else ""
+                description = cell_at("uraian")
+                if description and not re.match(r"^(total|sub\s*total|jumlah|hps)\b", description, re.I):
+                    result["items"].append({"no": len(result["items"]) + 1,
+                                            "uraian": description, "volume": cell_at("volume"),
+                                            "satuan": cell_at("satuan"),
+                                            "source": {"filename": filename,
+                                                       "location": f"{location}, baris {number}"}})
 
     try:
-        if is_excel or is_csv:
+        if extension in {".xlsx", ".xls"}:
             import pandas as pd
-            if isinstance(file_input, (str, Path)):
-                df = pd.read_excel(file_input) if is_excel else pd.read_csv(file_input)
-            else:
-                raw_bytes = file_input.getvalue() if isinstance(file_input, io.BytesIO) else file_input
-                buf = io.BytesIO(raw_bytes)
-                df = pd.read_excel(buf) if is_excel else pd.read_csv(buf)
+            sheets = pd.read_excel(io.BytesIO(raw), sheet_name=None, header=None, dtype=object)
+            for sheet, frame in sheets.items():
+                scan_rows(frame.where(pd.notna(frame), "").values.tolist(), f"sheet {sheet}")
+        elif extension == ".csv":
+            decoded = raw.decode("utf-8-sig")
+            try:
+                dialect = csv.Sniffer().sniff(decoded[:4096], delimiters=",;\t")
+            except csv.Error:
+                dialect = csv.excel
+            scan_rows(list(csv.reader(io.StringIO(decoded), dialect)), "CSV")
+        elif extension == ".pdf":
+            with pymupdf.open(stream=raw, filetype="pdf") as pdf:
+                for index, page in enumerate(pdf, 1):
+                    tables = page.find_tables()
+                    for table in tables.tables:
+                        scan_rows(table.extract(), f"halaman {index}")
+                    # Text-only PDF totals are accepted only when explicitly labeled.
+                    for line in page.get_text().splitlines():
+                        match = re.match(
+                            r"^\s*((?:prime\s*cost|sub\s*total|subtotal|hps|grand\s*total|total)\b[^\d\n]{0,90}?)\s*(?:Rp\.?\s*)?([\d][\d.,]*)\s*$",
+                            line, re.I)
+                        if match:
+                            scan_rows([[match.group(1), match.group(2)]], f"halaman {index}")
+        else:
+            result["issues"].append(f"Format BOQ {extension or 'tanpa ekstensi'} belum didukung.")
+    except Exception as exc:
+        result["issues"].append(f"BOQ {filename} belum dapat dibaca: {exc}")
 
-            # Search numeric totals in dataframe
-            # Convert cells to string to search for TOTAL / GRAND TOTAL / HPS
-            for idx, row in df.iterrows():
-                row_str = " ".join([str(val) for val in row.values if pd.notna(val)])
-                if re.search(r'(total|hps|jumlah|grand total)', row_str, re.IGNORECASE):
-                    # extract numbers from this row
-                    for val in row.values:
-                        if isinstance(val, (int, float)) and val > 1000000:
-                            if not prime_cost:
-                                prime_cost = float(val)
-                            elif val > prime_cost:
-                                total_kr = float(val)
-
-            # Sample top items for Lampiran 5B
-            col_names = [str(c).lower() for c in df.columns]
-            desc_col = None
-            vol_col = None
-            unit_col = None
-
-            for col in df.columns:
-                c_low = str(col).lower()
-                if "uraian" in c_low or "deskripsi" in c_low or "item" in c_low or "pekerjaan" in c_low:
-                    desc_col = col
-                elif "vol" in c_low or "qty" in c_low or "jumlah" in c_low:
-                    vol_col = col
-                elif "sat" in c_low or "unit" in c_low:
-                    unit_col = col
-
-            if desc_col:
-                for idx, row in df.head(20).iterrows():
-                    d_val = str(row.get(desc_col, "")).strip()
-                    if d_val and d_val.lower() != "nan" and not re.search(r'^(total|sub total)', d_val, re.IGNORECASE):
-                        items.append({
-                            "no": len(items) + 1,
-                            "uraian": d_val[:120],
-                            "volume": str(row.get(vol_col, "-")) if vol_col else "-",
-                            "satuan": str(row.get(unit_col, "-")) if unit_col else "-"
-                        })
-
-            summary_lines.append(f"BOQ File ({filename}): Terbaca {len(df)} baris data.")
-
-    except Exception as e:
-        summary_lines.append(f"Catatan pembacaan file BOQ: {e}")
-
-    # Fallback / calculation defaults if total_kr missing
-    if prime_cost and not total_kr:
-        total_kr = round(prime_cost * 1.08, 2)  # assume ~8% K&R margin default
-    elif not prime_cost and total_kr:
-        prime_cost = round(total_kr / 1.08, 2)
-
-    return {
-        "prime_cost": prime_cost,
-        "total_dengan_kr": total_kr,
-        "items": items,
-        "summary": "\n".join(summary_lines) if summary_lines else f"BOQ Lampiran ({filename})"
-    }
+    if result["prime_cost"] is None:
+        result["issues"].append("Prime Cost tidak ditemukan secara eksplisit di BOQ; isi manual setelah meninjau dokumen.")
+    if result["total_dengan_kr"] is None:
+        result["issues"].append("Total HPS termasuk keuntungan dan risiko tidak ditemukan secara eksplisit di BOQ; isi manual.")
+    if not result["items"]:
+        result["issues"].append("Tabel item BOQ belum terbaca; periksa format tabel sumber.")
+    result["summary"] = (f"BOQ: {filename}. {len(result['items'])} item terbaca; "
+                         f"nilai yang tidak ditemukan tidak dihitung otomatis.")
+    return result

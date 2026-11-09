@@ -35,33 +35,43 @@ class GenerateTenderDocumentTool:
     """Tool that generates a complete Dokumen Tender JSON payload using LLM."""
 
     def invoke(self, kwargs: dict) -> str:
-        nama_pengadaan = kwargs.get("nama_pengadaan", "Pengadaan Jasa / Barang")
-        nomor_tender = kwargs.get("nomor_tender", "No.Project/DT/PND970000/2026-S7")
-        tanggal = kwargs.get("tanggal", "04 Desember 2025")
+        required_text = ("nama_pengadaan", "nomor_tender", "tanggal", "resiko_csms",
+                         "pejabat_procurement_nama", "pejabat_procurement_jabatan",
+                         "pejabat_berwenang", "pengawas_pekerjaan", "metode_pemenuhan",
+                         "jenis_kontrak", "prebid_tanggal", "prebid_waktu", "prebid_tempat",
+                         "pemasukan_mulai", "pemasukan_selesai")
+        missing = [field for field in required_text if not str(kwargs.get(field) or "").strip()]
+        if missing:
+            return "Error: parameter tender belum lengkap: " + ", ".join(missing)
+        if not kwargs.get("prime_cost") or not kwargs.get("total_dengan_kr"):
+            return "Error: nilai HPS Prime Cost dan total harus diisi dari BOQ atau secara manual."
+        nama_pengadaan = kwargs["nama_pengadaan"]
+        nomor_tender = kwargs["nomor_tender"]
+        tanggal = kwargs["tanggal"]
         
         # Financial / HPS
-        prime_cost = float(kwargs.get("prime_cost", 13283434534.0))
-        total_kr = float(kwargs.get("total_dengan_kr", 14346100000.0))
+        prime_cost = float(kwargs["prime_cost"])
+        total_kr = float(kwargs["total_dengan_kr"])
         
         # CSMS & TKDN
-        resiko_csms = kwargs.get("resiko_csms", "Tinggi").capitalize()
-        tkdn_target = float(kwargs.get("tkdn_minimal", 20.12))
+        resiko_csms = kwargs["resiko_csms"].capitalize()
+        tkdn_target = float(kwargs.get("tkdn_minimal", 0))
         
         # Administrative & Procurement Officers
-        pejabat_proc_nama = kwargs.get("pejabat_procurement_nama", "Rigga Widar Atmagi")
-        pejabat_proc_jabatan = kwargs.get("pejabat_procurement_jabatan", "Area Manager Procurement Kalimantan")
-        pejabat_berwenang = kwargs.get("pejabat_berwenang", "Sr. Manager Opt. & Maint. Regional Kalimantan")
-        pengawas_pekerjaan = kwargs.get("pengawas_pekerjaan", "Region Manager RPD Regional Kalimantan")
-        metode_pemenuhan = kwargs.get("metode_pemenuhan", "Tender Terbatas")
-        jenis_kontrak = kwargs.get("jenis_kontrak", "Gabungan Harga Satuan & Lumpsum")
+        pejabat_proc_nama = kwargs["pejabat_procurement_nama"]
+        pejabat_proc_jabatan = kwargs["pejabat_procurement_jabatan"]
+        pejabat_berwenang = kwargs["pejabat_berwenang"]
+        pengawas_pekerjaan = kwargs["pengawas_pekerjaan"]
+        metode_pemenuhan = kwargs["metode_pemenuhan"]
+        jenis_kontrak = kwargs["jenis_kontrak"]
         
         # Prebid and Schedules
-        prebid_tgl = kwargs.get("prebid_tanggal", "Senin, 08 Desember 2025")
-        prebid_waktu = kwargs.get("prebid_waktu", "10.00 WITA")
-        prebid_tempat = kwargs.get("prebid_tempat", "Microsoft Teams Meeting dengan link yang disampaikan melalui email Undangan Prebid Meeting")
+        prebid_tgl = kwargs["prebid_tanggal"]
+        prebid_waktu = kwargs["prebid_waktu"]
+        prebid_tempat = kwargs["prebid_tempat"]
         
-        pemasukan_mulai = kwargs.get("pemasukan_mulai", "Senin, 08 Desember 2025")
-        pemasukan_selesai = kwargs.get("pemasukan_selesai", "Senin, 15 Desember 2025")
+        pemasukan_mulai = kwargs["pemasukan_mulai"]
+        pemasukan_selesai = kwargs["pemasukan_selesai"]
         
         # Additional context (e.g. from RKS or BOQ)
         context_summary = kwargs.get("context_summary", "")
@@ -131,6 +141,10 @@ Jawab HANYA dengan JSON valid, tanpa teks pengantar atau markdown tambahan di lu
             kk["pejabat_berwenang"] = pejabat_berwenang
             kk["pengawas_pekerjaan"] = pengawas_pekerjaan
             kk["jenis_kontrak"] = jenis_kontrak
+            kk.setdefault("syarat_kualifikasi_csms", {})["tingkat_risiko"] = resiko_csms
+            kk["syarat_kualifikasi_csms"]["kualifikasi_minimal"] = resiko_csms
+            kk.setdefault("evaluasi_hsse_plan", {})["tingkat_risiko"] = resiko_csms
+            kk.setdefault("evaluasi_tkdn", {})["minimal_persen"] = tkdn_target
 
             # Ensure HPS figures are deterministic
             hps = kk.setdefault("hps_oe", {})
@@ -144,6 +158,9 @@ Jawab HANYA dengan JSON valid, tanpa teks pengantar atau markdown tambahan di lu
             prebid["hari_tanggal"] = prebid_tgl
             prebid["waktu"] = prebid_waktu
             prebid["tempat"] = prebid_tempat
+            pemasukan = kk.setdefault("jadwal_pemasukan", {})
+            pemasukan["mulai_hari_tanggal"] = pemasukan_mulai
+            pemasukan["selesai_hari_tanggal"] = pemasukan_selesai
 
             # Store in active draft store
             _active_tender_store["current_draft"] = tender_json

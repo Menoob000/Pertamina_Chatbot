@@ -5,6 +5,7 @@ Provides RESTful endpoints to extract context from RKS/BOQ and generate formal D
 
 import os
 import io
+import hashlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -45,24 +46,24 @@ app.add_middleware(
 
 
 class TenderGenerateRequest(BaseModel):
-    nama_pengadaan: str = "Pengadaan Jasa / Barang"
-    nomor_tender: str = "No.Project/DT/PND970000/2026-S7"
-    tanggal: str = "04 Desember 2025"
-    prime_cost: float = 13283434534.0
-    total_dengan_kr: float = 14346100000.0
-    resiko_csms: str = "Tinggi"
-    tkdn_minimal: float = 20.12
-    pejabat_procurement_nama: str = "Rigga Widar Atmagi"
-    pejabat_procurement_jabatan: str = "Area Manager Procurement Kalimantan"
-    pejabat_berwenang: str = "Sr. Manager Opt. & Maint. Regional Kalimantan"
-    pengawas_pekerjaan: str = "Region Manager RPD Regional Kalimantan"
-    metode_pemenuhan: str = "Tender Terbatas"
-    jenis_kontrak: str = "Gabungan Harga Satuan & Lumpsum"
-    prebid_tanggal: str = "Senin, 08 Desember 2025"
-    prebid_waktu: str = "10.00 WITA"
-    prebid_tempat: str = "Microsoft Teams Meeting dengan link yang disampaikan melalui email Undangan Prebid Meeting"
-    pemasukan_mulai: str = "Senin, 08 Desember 2025"
-    pemasukan_selesai: str = "Senin, 15 Desember 2025"
+    nama_pengadaan: str = Field(min_length=1)
+    nomor_tender: str = Field(min_length=1)
+    tanggal: str = Field(min_length=1)
+    prime_cost: float = Field(gt=0)
+    total_dengan_kr: float = Field(gt=0)
+    resiko_csms: str = Field(pattern="^(Tinggi|Sedang|Rendah)$")
+    tkdn_minimal: float = Field(ge=0, le=100)
+    pejabat_procurement_nama: str = Field(min_length=1)
+    pejabat_procurement_jabatan: str = Field(min_length=1)
+    pejabat_berwenang: str = Field(min_length=1)
+    pengawas_pekerjaan: str = Field(min_length=1)
+    metode_pemenuhan: str = Field(min_length=1)
+    jenis_kontrak: str = Field(min_length=1)
+    prebid_tanggal: str = Field(min_length=1)
+    prebid_waktu: str = Field(min_length=1)
+    prebid_tempat: str = Field(min_length=1)
+    pemasukan_mulai: str = Field(min_length=1)
+    pemasukan_selesai: str = Field(min_length=1)
     context_summary: Optional[str] = ""
     boq_items: Optional[List[Dict[str, Any]]] = None
     output_filename: Optional[str] = ""
@@ -99,7 +100,8 @@ def get_recent_rks():
 async def extract_context(
     rks_file: Optional[UploadFile] = File(None),
     rks_filepath: Optional[str] = Form(None),
-    boq_file: Optional[UploadFile] = File(None)
+    boq_file: Optional[UploadFile] = File(None),
+    rks_artifact_id: Optional[str] = Form(None),
 ):
     """
     Extracts project metadata, CSMS risk, scope of work, and HPS from RKS and/or BOQ files.
@@ -113,6 +115,25 @@ async def extract_context(
         rks_data = extract_rks_info(content, filename=rks_file.filename)
     elif rks_filepath and os.path.exists(rks_filepath):
         rks_data = extract_rks_info(rks_filepath)
+    if rks_artifact_id and rks_data:
+        from tools.rks.service import artifact_file, get_document
+        try:
+            manifest = get_document(rks_artifact_id)
+            artifact_docx = artifact_file(rks_artifact_id, "docx")
+            if not rks_file or hashlib.sha256(content).hexdigest() != hashlib.sha256(artifact_docx.read_bytes()).hexdigest():
+                rks_data.setdefault("issues", []).append("Berkas RKS tidak cocok dengan artifact; CSMS manifest diabaikan.")
+            else:
+                category = (manifest.get("csms_assessment") or {}).get("category")
+                if category in {"HIGH", "MIDDLE", "LOW"}:
+                    rks_data["resiko_csms"] = {"HIGH": "Tinggi", "MIDDLE": "Sedang", "LOW": "Rendah"}[category]
+                    rks_data.setdefault("sources", {})["resiko_csms"] = {
+                        "filename": f"RKS-{rks_artifact_id[:8]}", "location": "manifest RKS, penilaian CSMS"}
+                else:
+                    rks_data["resiko_csms"] = None
+                    rks_data.setdefault("sources", {}).pop("resiko_csms", None)
+                    rks_data.setdefault("issues", []).append("Penilaian CSMS artifact belum pasti; isi manual.")
+        except (OSError, ValueError, KeyError):
+            rks_data.setdefault("issues", []).append("Manifest RKS tidak tersedia untuk verifikasi CSMS.")
 
     # 2. Process BOQ
     if boq_file and boq_file.filename:
@@ -129,11 +150,13 @@ async def extract_context(
     return {
         "status": "success",
         "nama_pengadaan": rks_data.get("nama_pengadaan") or "",
-        "resiko_csms": rks_data.get("resiko_csms") or "Tinggi",
-        "prime_cost": boq_data.get("prime_cost", 0.0),
-        "total_dengan_kr": boq_data.get("total_dengan_kr", 0.0),
+        "resiko_csms": rks_data.get("resiko_csms"),
+        "prime_cost": boq_data.get("prime_cost"),
+        "total_dengan_kr": boq_data.get("total_dengan_kr"),
         "boq_items": boq_data.get("items", []),
-        "combined_context_summary": "\n\n".join(context_parts)
+        "combined_context_summary": "\n\n".join(context_parts),
+        "sources": {**rks_data.get("sources", {}), **boq_data.get("sources", {})},
+        "issues": rks_data.get("issues", []) + boq_data.get("issues", []),
     }
 
 

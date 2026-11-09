@@ -9,6 +9,19 @@ from .catalog import list_sources
 from .service import create_document, artifact_file, get_document, latest_document
 
 
+def _continue_to_tender(artifact_id: str) -> None:
+    """Select a finalized RKS before the next Streamlit rerun."""
+    st.session_state["tender_rks_artifact_id"] = artifact_id
+    st.session_state["tender_rks_pending_artifact_id"] = artifact_id
+    st.session_state["show_rks_page"] = False
+    st.session_state["nav_choice"] = "tender"
+    st.session_state["app_nav_radio_menu"] = "📑 Dokumen Tender Generator"
+    for key in ("extraction_done", "tf_nama_pengadaan", "tf_resiko_csms",
+                "tf_prime_cost", "tf_total_kr", "tf_context_summary", "tf_boq_items",
+                "last_generated_tender", "uploader_boq_file", "chk_use_generated_rks"):
+        st.session_state.pop(key, None)
+
+
 def render_result(result: dict, key: str = "rks", compact: bool = False):
     status = result.get("status", "gagal")
     if status == "gagal":
@@ -48,6 +61,8 @@ def render_result(result: dict, key: str = "rks", compact: bool = False):
         docx = artifact_file(result["artifact_id"], "docx")
         st.download_button("Unduh DOCX", docx.read_bytes(), f"RKS-{result['artifact_id'][:8]}.docx",
                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"{key}-docx")
+        st.button("Lanjutkan ke Tender", key=f"{key}-to-tender",
+                  on_click=_continue_to_tender, args=(result["artifact_id"],))
         if result.get("preview", {}).get("available"):
             pdf_path = artifact_file(result["artifact_id"], "pdf")
             pdf_data = pdf_path.read_bytes()

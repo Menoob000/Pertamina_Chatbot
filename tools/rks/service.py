@@ -6,6 +6,7 @@ import json
 import re
 import logging
 import config
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +23,10 @@ OUTPUT_DIR = ROOT / "output" / "rks"
 PIPELINE_VERSION = "rks-editable-layout-v17"
 
 
+def _created_at() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _general_template(query: str, output_dir: Path, render_preview: bool) -> dict:
     artifact_id = uuid4().hex
     folder = output_dir / artifact_id
@@ -32,6 +37,7 @@ def _general_template(query: str, output_dir: Path, render_preview: bool) -> dic
         preview = finalize_and_preview(docx, 8) if render_preview else {
             "available": False, "message": "Preview belum dirender."}
         manifest = {"artifact_id": artifact_id, "pipeline_version": PIPELINE_VERSION,
+                    "created_at": _created_at(), "request_query": query,
                     "status": "perlu pemeriksaan", "mode": "template umum", "source": None,
                     "source_pages": 0, "evidence": [], "section_provenance": [], "preview": preview,
                     "issues": [{"page": None, "message": "Sumber knowledge base yang cukup relevan tidak ditemukan. Semua placeholder harus dilengkapi dan diperiksa."}],
@@ -47,6 +53,7 @@ def _general_template(query: str, output_dir: Path, render_preview: bool) -> dic
     except Exception:
         logging.getLogger(__name__).exception("General RKS template creation failed")
         failure = {"artifact_id": artifact_id, "status": "gagal", "mode": "template umum",
+                   "created_at": _created_at(), "request_query": query,
                    "message": "Template umum RKS gagal dibuat. Periksa log layanan."}
         (folder / "manifest.json").write_text(json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
         return failure
@@ -135,6 +142,7 @@ def create_document(query: str, source_id: str = "", *, data_dir: Path = DATA_DI
                           "Periksa kecocokan proyek sebelum digunakan." if tied else
                           "Sumber dengan peringkat tertinggi dipilih otomatis.")
         manifest = {"artifact_id": artifact_id, "pipeline_version": PIPELINE_VERSION,
+                    "created_at": _created_at(), "request_query": query,
                     "mode": "sumber knowledge base", "selection": {"method": "peringkat otomatis",
                     "match_score": source.get("match_score"), "alternatives": alternatives,
                     "note": selection_note}, "evidence": evidence,
@@ -157,6 +165,7 @@ def create_document(query: str, source_id: str = "", *, data_dir: Path = DATA_DI
     except Exception as exc:
         logging.getLogger(__name__).exception("RKS generation failed for %s", source["filename"])
         failure = {"artifact_id": artifact_id, "status": "gagal", "source": public_source(source),
+                   "created_at": _created_at(), "request_query": query,
                    "message": "Pembuatan RKS gagal. Sumber belum dapat diproses; pilih RKS acuan lain atau periksa log layanan."}
         (folder / "manifest.json").write_text(json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
         return failure
@@ -166,6 +175,41 @@ def get_document(artifact_id: str, output_dir: Path = OUTPUT_DIR) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", artifact_id):
         raise FileNotFoundError("Identitas dokumen tidak valid.")
     return json.loads((output_dir / artifact_id / "manifest.json").read_text(encoding="utf-8"))
+
+
+def list_documents(output_dir: Path = OUTPUT_DIR, limit: int = 100) -> list[dict]:
+    """List generated RKS artifacts without opening document bytes or indexing them as KB."""
+    if not output_dir.is_dir():
+        return []
+    manifests = sorted(output_dir.glob("*/manifest.json"),
+                       key=lambda path: path.stat().st_mtime, reverse=True)
+    documents = []
+    for path in manifests:
+        try:
+            artifact_id = path.parent.name
+            if not re.fullmatch(r"[0-9a-f]{32}", artifact_id):
+                continue
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            if manifest.get("artifact_id") != artifact_id:
+                continue
+            source = manifest.get("source") or {}
+            documents.append({
+                "artifact_id": artifact_id,
+                "created_at": manifest.get("created_at") or datetime.fromtimestamp(
+                    path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
+                "title": manifest.get("request_query") or source.get("filename") or "Template umum RKS",
+                "status": manifest.get("status", "tidak diketahui"),
+                "mode": manifest.get("mode") or ("sumber knowledge base" if source else "template umum"),
+                "source": {"source_id": source.get("source_id"),
+                           "filename": source.get("filename")} if source else None,
+                "preview_available": bool(manifest.get("preview", {}).get("available")),
+                "related_documents": manifest.get("related_documents", []),
+            })
+            if len(documents) >= max(1, min(limit, 500)):
+                break
+        except (OSError, ValueError, TypeError, AttributeError):
+            logging.getLogger(__name__).warning("Skipping unreadable RKS manifest: %s", path)
+    return documents
 
 
 def artifact_file(artifact_id: str, kind: str, output_dir: Path = OUTPUT_DIR) -> Path:

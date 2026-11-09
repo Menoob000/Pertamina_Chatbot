@@ -22,6 +22,7 @@ from tools.rks.streamlit_view import render_rks_page, render_chat_preview
 from tools.rks.chat import current_document as select_chat_document
 from tools.docx_exporter import parse_text_to_rks_data
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
+from rag.conversation_store import ConversationStore
 
 # ---------------------------------------------------------------------------
 # Page Configuration & Professional Theming
@@ -285,21 +286,55 @@ st.html(
 # ---------------------------------------------------------------------------
 # Session State Initialization
 # ---------------------------------------------------------------------------
+owner_token = st.query_params.get("chat_owner", "")
+if not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+    owner_token = uuid.uuid4().hex
+    st.query_params["chat_owner"] = owner_token
+if st.session_state.get("_chat_owner_token") not in (None, owner_token):
+    for key in ("threads", "current_thread_id", "_chat_store_synced_owner",
+                "_chat_migrated_threads"):
+        st.session_state.pop(key, None)
+st.session_state["_chat_owner_token"] = owner_token
+
+try:
+    chat_store = ConversationStore(owner_token)
+    chat_store.initialize()
+except Exception as exc:
+    chat_store = None
+    st.warning(f"Riwayat percakapan belum terhubung ke PostgreSQL: {exc}")
+
+
 def init_session_state():
     if "threads" not in st.session_state:
-        initial_thread_id = f"thread_{str(uuid.uuid4())[:8]}"
-        st.session_state.threads = {
-            initial_thread_id: {
-                "id": initial_thread_id,
-                "title": "Chat 1",
-                "created_at": datetime.now().strftime("%H:%M"),
-                "tool_history": [],
+        saved_threads = chat_store.list_threads() if chat_store else []
+        if saved_threads:
+            st.session_state.threads = {item["id"]: item for item in saved_threads}
+            requested = st.query_params.get("chat_thread", "")
+            st.session_state.current_thread_id = (
+                requested if requested in st.session_state.threads else saved_threads[0]["id"]
+            )
+        else:
+            initial_thread_id = f"thread_{uuid.uuid4().hex}"
+            st.session_state.threads = {
+                initial_thread_id: {
+                    "id": initial_thread_id,
+                    "title": "Chat 1",
+                    "created_at": datetime.now().strftime("%H:%M"),
+                    "tool_history": [],
+                }
             }
-        }
-        st.session_state.current_thread_id = initial_thread_id
+            st.session_state.current_thread_id = initial_thread_id
+            if chat_store:
+                chat_store.create_thread(initial_thread_id, "Chat 1")
+        st.query_params["chat_thread"] = st.session_state.current_thread_id
 
     if "current_thread_id" not in st.session_state:
         st.session_state.current_thread_id = list(st.session_state.threads.keys())[0]
+
+    if chat_store and st.session_state.get("_chat_store_synced_owner") != owner_token:
+        for thread in st.session_state.threads.values():
+            chat_store.ensure_thread(thread["id"], thread["title"])
+        st.session_state["_chat_store_synced_owner"] = owner_token
 
     if "active_tool_now" not in st.session_state:
         st.session_state.active_tool_now = None
@@ -326,8 +361,10 @@ current_thread = st.session_state.threads[current_thread_id]
 # Helper Functions
 # ---------------------------------------------------------------------------
 def create_new_thread():
-    new_id = f"thread_{str(uuid.uuid4())[:8]}"
+    new_id = f"thread_{uuid.uuid4().hex}"
     chat_idx = len(st.session_state.threads) + 1
+    if chat_store:
+        chat_store.create_thread(new_id, f"Chat {chat_idx}")
     st.session_state.threads[new_id] = {
         "id": new_id,
         "title": f"Chat {chat_idx}",
@@ -335,19 +372,44 @@ def create_new_thread():
         "tool_history": [],
     }
     st.session_state.current_thread_id = new_id
+    st.query_params["chat_thread"] = new_id
     st.session_state.active_tool_now = None
 
 
 def get_thread_messages(thread_id: str):
-    """Retrieves conversation messages stored in LangGraph's MemorySaver for this thread."""
+    """Restore persisted messages to LangGraph when its in-memory state is empty."""
     try:
         config = {"configurable": {"thread_id": thread_id}}
         state = app.get_state(config)
-        if state and state.values:
-            return state.values.get("messages", [])
+        messages = state.values.get("messages", []) if state and state.values else []
+        if messages and chat_store:
+            migrated = st.session_state.setdefault("_chat_migrated_threads", set())
+            if thread_id not in migrated:
+                try:
+                    if not chat_store.load_messages(thread_id):
+                        chat_store.save_messages(thread_id, messages)
+                    migrated.add(thread_id)
+                except Exception as exc:
+                    st.warning(f"Riwayat percakapan belum tersimpan: {exc}")
+        elif chat_store:
+            messages = chat_store.load_messages(thread_id)
+            if messages:
+                app.update_state(config, {"messages": messages}, as_node="agent")
+        return messages
     except Exception as e:
         st.error(f"Error fetching state for thread {thread_id}: {e}")
     return []
+
+
+def persist_thread_messages(thread_id: str):
+    if not chat_store:
+        return
+    try:
+        state = app.get_state({"configurable": {"thread_id": thread_id}})
+        if state and state.values:
+            chat_store.save_messages(thread_id, state.values.get("messages", []))
+    except Exception as exc:
+        st.error(f"Percakapan belum tersimpan ke database: {exc}")
 
 
 def extract_docx_path(text: str) -> Optional[str]:
@@ -560,6 +622,7 @@ with st.sidebar:
             type="primary" if is_active else "secondary",
         ):
             st.session_state.current_thread_id = t_id
+            st.query_params["chat_thread"] = t_id
             st.rerun()
 
     st.write("")
@@ -571,13 +634,18 @@ with st.sidebar:
         new_title = st.text_input("Rename Session", value=current_thread["title"], key="rename_title_input")
         if st.button("Save Name", key="btn_save_thread_name", use_container_width=True):
             if new_title.strip():
+                if chat_store:
+                    chat_store.rename_thread(current_thread_id, new_title.strip())
                 st.session_state.threads[current_thread_id]["title"] = new_title.strip()
                 st.rerun()
 
         if len(st.session_state.threads) > 1:
             if st.button("🗑️ Delete Session", key="btn_delete_current_thread", use_container_width=True):
+                if chat_store:
+                    chat_store.delete_thread(current_thread_id)
                 del st.session_state.threads[current_thread_id]
                 st.session_state.current_thread_id = list(st.session_state.threads.keys())[0]
+                st.query_params["chat_thread"] = st.session_state.current_thread_id
                 st.rerun()
 
     # Database PDF Converter Shortcut in Sidebar
@@ -915,6 +983,8 @@ if user_prompt:
 
     if current_thread["title"].startswith("Chat ") and len(thread_messages) == 0:
         suggested_title = user_prompt.strip()[:24] + ("..." if len(user_prompt.strip()) > 24 else "")
+        if chat_store:
+            chat_store.rename_thread(current_thread_id, suggested_title)
         st.session_state.threads[current_thread_id]["title"] = suggested_title
 
     config = {"configurable": {"thread_id": current_thread_id}}
@@ -925,6 +995,7 @@ if user_prompt:
             response_placeholder = st.empty()
             final_answer = ""
             generated_docx_path = None
+            stream_completed = False
 
             try:
                 for event in app.stream(input_state, config=config, stream_mode="updates"):
@@ -989,6 +1060,7 @@ if user_prompt:
                                 history[-1]["result_preview"] = str(tm_content)[:250]
                                 history[-1]["status"] = "completed"
 
+                stream_completed = True
                 st.session_state.active_tool_now = None
 
                 if final_answer:
@@ -1000,5 +1072,8 @@ if user_prompt:
             except Exception as e:
                 st.session_state.active_tool_now = None
                 st.error(f"Error while executing agent: {str(e)}")
+            finally:
+                if stream_completed:
+                    persist_thread_messages(current_thread_id)
 
     st.rerun()
