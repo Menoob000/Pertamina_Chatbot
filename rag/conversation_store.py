@@ -27,6 +27,8 @@ class ConversationStore:
 
     def initialize(self):
         with self._connect() as conn:
+            from tools.tender.contract_archive import initialize_contract_archive
+            initialize_contract_archive(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_users (
                     id TEXT PRIMARY KEY,
@@ -57,6 +59,31 @@ class ConversationStore:
                     thread_id TEXT PRIMARY KEY REFERENCES chat_threads(id) ON DELETE CASCADE,
                     payload JSONB NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_officials (
+                    id BIGSERIAL PRIMARY KEY,
+                    owner_token TEXT NOT NULL,
+                    project_key TEXT NOT NULL,
+                    rks_artifact_id TEXT,
+                    role TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    position TEXT NOT NULL DEFAULT '',
+                    organization_unit TEXT NOT NULL DEFAULT '',
+                    source_type TEXT NOT NULL,
+                    source_location JSONB NOT NULL DEFAULT '[]',
+                    payload JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE(owner_token, project_key, role)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_official_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    official_id BIGINT NOT NULL REFERENCES project_officials(id),
+                    payload JSONB NOT NULL,
+                    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
             """)
             conn.execute("""
@@ -167,3 +194,47 @@ class ConversationStore:
                 ON CONFLICT (thread_id) DO UPDATE
                 SET payload = EXCLUDED.payload, updated_at = now()
             """, (thread_id, Jsonb(payload)))
+
+    def load_project_officials(self, project_key: str) -> dict:
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT role, payload FROM project_officials
+                WHERE owner_token = %s AND project_key = %s
+            """, (self.owner_token, project_key)).fetchall()
+        return dict(rows)
+
+    def save_project_officials(self, project_key: str, officials: dict) -> None:
+        from tools.tender.officers import ROLES
+
+        if not project_key or len(project_key) > 100:
+            raise ValueError("Identitas proyek pejabat tidak valid.")
+        artifact_id = project_key[4:] if project_key.startswith("rks:") else None
+        with self._connect() as conn:
+            for role in ROLES:
+                official = officials.get(role) or {}
+                previous = conn.execute("""
+                    SELECT id, payload FROM project_officials
+                    WHERE owner_token = %s AND project_key = %s AND role = %s FOR UPDATE
+                """, (self.owner_token, project_key, role)).fetchone()
+                if previous and previous[1] == official:
+                    continue
+                sources = set((official.get("field_sources") or {}).values())
+                origin = "user" if "user" in sources else "rks" if "rks" in sources else "placeholder"
+                row = conn.execute("""
+                    INSERT INTO project_officials
+                    (owner_token, project_key, rks_artifact_id, role, name, position,
+                     organization_unit, source_type, source_location, payload)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (owner_token, project_key, role) DO UPDATE SET
+                    name = EXCLUDED.name, position = EXCLUDED.position,
+                    organization_unit = EXCLUDED.organization_unit,
+                    source_type = EXCLUDED.source_type, source_location = EXCLUDED.source_location,
+                    payload = EXCLUDED.payload, updated_at = now()
+                    RETURNING id
+                """, (self.owner_token, project_key, artifact_id, role,
+                      official.get("name") or "", official.get("position") or "",
+                      official.get("organization_unit") or "", origin,
+                      Jsonb(official.get("evidence") or []), Jsonb(official))).fetchone()
+                conn.execute("""
+                    INSERT INTO project_official_history (official_id, payload) VALUES (%s, %s)
+                """, (row[0], Jsonb(official)))

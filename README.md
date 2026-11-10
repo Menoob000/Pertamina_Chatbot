@@ -70,6 +70,12 @@ docker run --name pgvector-container \
 uv run python -m rag.doc_loader
 ```
 
+Knowledge base mendukung PDF dan DOCX dalam `data/`. Loader menyimpan struktur
+heading/tabel, lokasi sumber, dan hash isi; sumber yang tidak berubah dilewati,
+sedangkan sumber yang berubah diindeks ulang. Dukungan DOCX mencakup pencarian
+dan pembuatan RKS dengan penomoran serta tabel Word tetap dapat diedit.
+Panduan dan batasannya tersedia di [Dukungan DOCX](docs/docx_knowledge_base.md).
+
 ---
 
 ### 2. Jalankan FastAPI Backend Server (Port 8000)
@@ -118,6 +124,16 @@ Di antarmuka Streamlit, Anda dapat berpindah mode kerja menggunakan **Menu Navig
 4. **Generate Dokumen Tender:** Tinjau form parameter, lalu klik **"🚀 Generate Dokumen Tender (.docx)"**.
    * FastAPI akan menyusun dokumen tender lengkap (~40-60 halaman standar Pertamina Patra Niaga).
    * Tombol unduh file `.docx` siap pakai akan langsung ditampilkan di layar.
+
+### C. Gudang Rancangan Kontrak
+
+Setiap tender yang berhasil dibuat juga menghasilkan DOCX tersendiri untuk Bagian B
+(rancangan kontrak). Salinan DOCX dan identitas RKS asalnya, bila memakai RKS hasil
+generator, disimpan di tabel PostgreSQL `contract_drafts`. Buka **Gudang Rancangan
+Kontrak** pada sidebar untuk mencari, meninjau halaman, mengunduh DOCX, atau kembali
+ke RKS asal. Dokumen arsip ini berstatus draft dan tidak dimasukkan otomatis ke
+knowledge base. Jika penyimpanan database gagal, halaman tender menampilkan
+peringatan; file tender tetap tersedia untuk diunduh.
 
 ---
 

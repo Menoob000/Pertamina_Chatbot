@@ -20,7 +20,7 @@ from .template import render_general_template
 from .csms import assess_csms
 
 OUTPUT_DIR = ROOT / "output" / "rks"
-PIPELINE_VERSION = "rks-editable-layout-v17"
+PIPELINE_VERSION = "rks-editable-layout-v18-docx"
 
 
 def _created_at() -> str:
@@ -101,10 +101,10 @@ def create_document(query: str, source_id: str = "", *, data_dir: Path = DATA_DI
                     section_provenance.append({"section": element["text"],
                                                "filename": source["filename"],
                                                "source_id": source["source_id"],
-                                               "page": page["page"]})
+                                               "page": page["page"], "location": element.get("location")})
         section_queries = headings[:max(1, config.RKS_SEARCH_MAX_SECTIONS)] if headings else [query]
         evidence = []
-        semantic_available = True
+        semantic_available = config.RKS_SEARCH_SEMANTIC_ENABLED
         for heading in section_queries:
             retrieved = search_evidence(heading, [source], top_k=config.RKS_SEARCH_TOP_K,
                                         use_semantic=semantic_available)
@@ -149,13 +149,15 @@ def create_document(query: str, source_id: str = "", *, data_dir: Path = DATA_DI
                     "section_provenance": section_provenance,
                     "csms_assessment": csms_assessment,
                     "status": "perlu pemeriksaan" if issues else "lengkap",
-                    "source": public_source(source), "source_pages": len(extracted["pages"]),
+                    "source": public_source(source), "source_pages": source.get("pages", len(extracted["pages"])),
                     "issues": issues, "preview": preview, "verification": verification,
                     "heading_count": extracted["heading_count"],
                     "docx_sha256": hashlib.sha256(docx.read_bytes()).hexdigest(),
                     "docx_url": f"/api/rks/{artifact_id}/document.docx",
                     "preview_url": f"/api/rks/{artifact_id}/preview.pdf" if preview.get("available") else None,
                     "boq_status": boq_status, "boq_source_pages": sorted(set(boq_pages)),
+                    "boq_source_locations": [e.get("location") for p in extracted["pages"] for e in p["elements"]
+                                             if e["kind"] == "table" and re.search(r"\b(?:boq|volume|qty)\b", e.get("text", ""), re.I)],
                     "boq_note": f"BOQ: {boq_status}. Isi mengikuti sumber; tidak ada item, volume, atau harga yang ditambahkan.",
                     "message": "Draf tertata dari RKS referensi. Data proyek asal tetap tercantum."}
         if preview.get("available"):

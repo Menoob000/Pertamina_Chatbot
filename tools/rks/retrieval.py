@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 import os
 import socket
@@ -12,6 +13,7 @@ import pymupdf
 import config
 from .catalog import tokens
 from .extraction import heading_level
+from rag.source_reader import source_chunks
 
 
 def _chunks(text: str, size: int, overlap: int):
@@ -31,6 +33,7 @@ def _metadata(source: dict, page: int | None = None) -> dict:
     year = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", filename)
     version = re.search(r"\b(?:rev(?:isi)?|versi|v)[ ._-]*(\d+)\b", filename, re.I)
     return {"source_id": source["source_id"], "filename": filename, "page": page,
+            "source_sha256": source.get("sha256"), "file_format": source.get("file_format", Path(source["filename"]).suffix.lstrip(".")),
             "document_type": "RKS" if re.search(r"\bRKS\b", filename, re.I) else None,
             "year": int(year.group()) if year else None,
             "version": version.group(1) if version else None}
@@ -63,25 +66,18 @@ def search_evidence(query: str, sources: list[dict], *, filters: dict | None = N
     results: dict[tuple[str, int | None, str], dict] = {}
     for source in eligible:
         try:
-            with pymupdf.open(source["path"]) as pdf:
-                for page_number, page in enumerate(pdf, 1):
-                    text = page.get_text().strip()
-                    if not text:
-                        continue
-                    section = next((line.strip() for line in text.splitlines()
-                                    if heading_level(line.strip())), None)
-                    page_meta = {**_metadata(source, page_number), "section": section}
-                    if not _allowed(page_meta, filters):
-                        continue
-                    for chunk in _chunks(text, config.RKS_SEARCH_CHUNK_SIZE, config.RKS_SEARCH_CHUNK_OVERLAP):
-                        found = wanted & tokens(chunk)
-                        if not found:
-                            continue
-                        score = len(found) / len(wanted)
-                        key = (source["source_id"], page_number, chunk[:80])
-                        results[key] = {**page_meta, "content": chunk,
-                                        "keyword_score": round(score, 4), "semantic_score": None,
-                                        "matched_terms": sorted(found)}
+            for chunk, block_meta in source_chunks(source):
+                page_meta = {**_metadata(source, block_meta.get("page")), **block_meta}
+                if not _allowed(page_meta, filters):
+                    continue
+                found = wanted & tokens(chunk)
+                if not found:
+                    continue
+                score = len(found) / len(wanted)
+                key = (source["source_id"], block_meta["location"], hashlib.sha256(chunk.encode()).hexdigest())
+                results[key] = {**page_meta, "content": chunk,
+                                "keyword_score": round(score, 4), "semantic_score": None,
+                                "matched_terms": sorted(found)}
         except (OSError, ValueError, RuntimeError):
             logging.getLogger(__name__).exception("Cannot read RKS source %s", source["filename"])
     semantic_status = "dinonaktifkan"
@@ -101,13 +97,19 @@ def search_evidence(query: str, sources: list[dict], *, filters: dict | None = N
                 source = by_name.get(Path(doc.metadata.get("file_name", "")).name.casefold())
                 if source is None:
                     continue
+                indexed_hash = doc.metadata.get("source_sha256")
+                if indexed_hash and indexed_hash != source.get("sha256"):
+                    continue
+                if source.get("file_format") == "docx" and not indexed_hash:
+                    continue
                 page = doc.metadata.get("page")
                 page = int(page) if isinstance(page, int) or str(page).isdigit() else None
-                meta = {**_metadata(source, page), "section": doc.metadata.get("section")}
+                meta = {**_metadata(source, page), "section": doc.metadata.get("section"),
+                        "location": doc.metadata.get("location") or (f"halaman {page}" if page else None)}
                 if not _allowed(meta, filters):
                     continue
                 content = doc.page_content or ""
-                key = (source["source_id"], page, content[:80])
+                key = (source["source_id"], meta["location"], hashlib.sha256(content.encode()).hexdigest())
                 matched = wanted & tokens(content)
                 item = results.setdefault(key, {**meta, "content": content,
                                                  "keyword_score": round(len(matched) / len(wanted), 4),

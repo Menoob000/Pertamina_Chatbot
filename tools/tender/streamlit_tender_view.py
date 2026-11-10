@@ -18,18 +18,22 @@ import streamlit as st
 from tools.rks.service import artifact_file, get_document, list_documents, record_related_tender
 from tools.rks.chat import payload as parse_chat_payload
 from tools.tender.preview import prepare_tender_preview, preview_key
+from tools.tender.officer_view import render_official_editor, restore_project_officials
+from tools.tender.placeholders import NOMOR_TENDER
 
 API_HOST = os.getenv("FASTAPI_HOST", "127.0.0.1")
 API_PORT = os.getenv("FASTAPI_PORT", "8000")
 FASTAPI_BASE_URL = os.getenv("FASTAPI_BASE_URL", f"http://{API_HOST}:{API_PORT}")
 
 
-def check_api_status() -> bool:
+def check_api_status() -> tuple[bool, bool]:
     try:
         r = requests.get(f"{FASTAPI_BASE_URL}/api/health", timeout=2)
-        return r.status_code == 200
+        if r.status_code != 200:
+            return False, False
+        return True, bool((r.json().get("features") or {}).get("contract_archive"))
     except Exception:
-        return False
+        return False, False
 
 
 def _render_preview_and_download(docx_data: bytes, filename: str, key: str) -> None:
@@ -92,8 +96,19 @@ def _render_tender_download(result: dict, render_download_card_fn) -> None:
     filename = os.path.basename(result.get("filename") or "Dokumen_Tender.docx")
     st.divider()
     st.markdown("### 📥 File Dokumen Tender Siap Ditinjau")
+    if details.get("missing_fields"):
+        st.warning("Draft ini masih memerlukan pengisian: " + ", ".join(details["missing_fields"]) + ". Periksa placeholder pada DOCX sebelum digunakan.")
+    if result.get("contract_archive_warning"):
+        st.warning(result["contract_archive_warning"])
+    elif result.get("contract_id"):
+        if st.button("Buka di Gudang Rancangan Kontrak", key=f"tender-open-contract-{result['contract_id']}"):
+            st.session_state["show_contract_library"] = True
+            st.session_state["show_rks_library"] = False
+            st.session_state["show_rks_page"] = False
+            st.query_params["contract_draft"] = result["contract_id"]
+            st.rerun()
     st.write(f"**Nama Pengadaan:** {details.get('nama_pengadaan')}")
-    st.write(f"**Nomor Tender:** `{details.get('nomor_tender')}`")
+    st.write(f"**Nomor Tender:** `{details.get('nomor_tender') or NOMOR_TENDER}`")
     st.write(f"**Kriteria Teknis Lampiran 2A:** {details.get('kriteria_teknis_count', 0)} kriteria terukur disusun")
     st.write("**Cakupan Dokumen:** Sampul resmi, Bagian A (Tabel IKPP 40 butir, 30 artikel umum), Lampiran 1A-8, Bagian B (Rancangan Kontrak 18 pasal, PI-07, SP3MK).")
 
@@ -134,6 +149,7 @@ _TENDER_DRAFT_KEYS = (
     "tf_resiko_csms", "tf_prime_cost", "tf_total_kr", "tf_context_summary",
     "tf_boq_items", "tf_sources", "tf_issues", "inp_final_outname",
     "_tender_suggested_filename",
+    "tf_officials", "tf_officials_project_key",
 )
 
 
@@ -243,13 +259,16 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
     )
 
     # API Backend Healthcheck Badge
-    api_online = check_api_status()
+    api_online, archive_supported = check_api_status()
     if api_online:
         st.markdown(
             f"<div style='display:inline-block; padding:4px 12px; background:#ECFDF5; border:1px solid #A7F3D0; border-radius:16px; font-size:0.8rem; color:#059669; font-weight:600; margin-bottom:16px;'>"
             f"🟢 FastAPI Backend Terhubung (<code>{FASTAPI_BASE_URL}</code>)</div>",
             unsafe_allow_html=True,
         )
+        if not archive_supported:
+            st.error("Backend di port 8000 masih versi lama dan belum mendukung Gudang Rancangan Kontrak. "
+                     "Bangun ulang backend Docker sebelum membuat tender berikutnya.")
     else:
         st.warning(
             f"⚠️ FastAPI Backend belum aktif di `{FASTAPI_BASE_URL}`. "
@@ -394,6 +413,13 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
                         st.session_state.tf_boq_items = extracted.get("boq_items") or []
                         st.session_state.tf_sources = extracted.get("sources") or {}
                         st.session_state.tf_issues = extracted.get("issues") or []
+                        st.session_state.tf_officials_project_key = extracted.get("officials_project_key")
+                        st.session_state.tf_officials = extracted.get("officials") or {}
+                        try:
+                            st.session_state.tf_officials = restore_project_officials(
+                                extracted.get("officials"), extracted.get("officials_project_key"), chat_store)
+                        except Exception as exc:
+                            st.warning(f"Koreksi pejabat sebelumnya belum dapat dipulihkan: {exc}")
                         st.session_state.pop("last_generated_tender", None)
 
                         st.session_state.extraction_done = True
@@ -488,7 +514,7 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
                 st.markdown("**Data pengadaan lainnya:** lengkapi pada formulir di bawah sesuai dokumen resmi.")
 
         with st.expander("Lengkapi dan periksa data tender", expanded=False):
-            st.caption("Nilai yang terisi otomatis berasal dari dokumen sumber. Kosongkan atau ubah bila hasil baca kurang tepat.")
+            st.caption("Semua kolom tetap dapat diisi. Nilai yang kosong akan tampil sebagai placeholder pada draft DOCX.")
             basic_left, basic_right = st.columns(2)
             with basic_left:
                 form_csms = st.selectbox("Risiko CSMS", ["", "Tinggi", "Sedang", "Rendah"],
@@ -497,6 +523,7 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
                                              step=1000.0, key="tender_field_prime_cost")
                 form_total = st.number_input("Total HPS termasuk K&R (Rp)", min_value=0.0,
                                              step=1000.0, key="tender_field_total_dengan_kr")
+                st.caption("Nilai 0 berarti HPS belum diisi; pada DOCX akan tampil placeholder.")
             with basic_right:
                 form_nomor = st.text_input("Nomor tender", key="tender_field_nomor_tender")
                 form_tanggal = st.text_input("Tanggal dokumen", key="tender_field_tanggal")
@@ -505,11 +532,8 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
                 form_metode = st.text_input("Metode pemenuhan", key="tender_field_metode_pemenuhan")
                 form_kontrak = st.text_input("Jenis kontrak", key="tender_field_jenis_kontrak")
         with st.expander("Pejabat dan jadwal pengadaan", expanded=True):
+            officials = render_official_editor(chat_store)
             text_fields = {
-                "pejabat_procurement_nama": "Nama pejabat procurement",
-                "pejabat_procurement_jabatan": "Jabatan pejabat procurement",
-                "pejabat_berwenang": "Pejabat berwenang",
-                "pengawas_pekerjaan": "Pengawas pekerjaan",
                 "prebid_tanggal": "Tanggal pre-bid",
                 "prebid_waktu": "Waktu pre-bid",
                 "prebid_tempat": "Tempat atau media pre-bid",
@@ -542,18 +566,21 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
         if btn_generate:
             if not api_online:
                 st.error("Server FastAPI tidak dapat dihubungi. Pastikan backend aktif di port 8000 (`uv run python -m api.main`).")
+            elif not archive_supported:
+                st.error("Backend yang aktif belum mendukung arsip kontrak. Perbarui backend Docker, lalu coba lagi.")
             else:
-                required = {
-                    "Nama pengadaan": form_nama, "Risiko CSMS": form_csms,
+                if not str(form_nama or "").strip():
+                    st.error("Nama pengadaan perlu diisi agar draft dapat diberi identitas proyek.")
+                    return
+                optional = {
                     "HPS Prime Cost": form_prime, "Total HPS": form_total,
                     "Nomor tender": form_nomor, "Tanggal dokumen": form_tanggal,
                     "Metode pemenuhan": form_metode, "Jenis kontrak": form_kontrak,
-                    **{label: extra_fields[field] for field, label in text_fields.items()},
+                    "Risiko CSMS": form_csms,
                 }
-                missing = [label for label, value in required.items() if not value or not str(value).strip()]
+                missing = [label for label, value in optional.items() if not value or not str(value).strip()]
                 if missing:
-                    st.error("Lengkapi data berikut sebelum generate: " + ", ".join(missing))
-                    return
+                    st.warning("Draft akan memakai placeholder untuk: " + ", ".join(missing) + ". Kolom pengisian tetap tersedia di atas.")
                 with st.spinner("🤖 AI sedang menyusun Dokumen Tender lengkap (IKPP 40 butir, Kriteria Lampiran 2A terukur, BoQ, dan Rancangan Kontrak 18 Pasal)..."):
                     try:
                         payload = {
@@ -567,8 +594,10 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
                             "metode_pemenuhan": form_metode,
                             "jenis_kontrak": form_kontrak,
                             **extra_fields,
+                            "officials": officials,
                             "context_summary": info_context,
                             "boq_items": info_boq_items,
+                            "rks_artifact_id": generated_rks_id if generated_rks_docx and use_active_rks else None,
                             "output_filename": out_filename
                         }
 
@@ -577,6 +606,10 @@ def render_tender_generator_page(render_download_card_fn, chat_store=None, threa
                         if res.status_code == 200:
                             gen_result = res.json()
                             st.session_state.last_generated_tender = gen_result
+                            if gen_result.get("contract_archive_warning"):
+                                st.warning(gen_result["contract_archive_warning"])
+                            elif gen_result.get("contract_id"):
+                                st.info("Rancangan kontrak tersimpan di Gudang Kontrak.")
                             if generated_rks_docx and use_active_rks:
                                 try:
                                     record_related_tender(generated_rks_id, gen_result["filename"])

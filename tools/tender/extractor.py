@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional, Union
 
 import docx
 import pymupdf
+from .officer_extraction import extract_officials
 
 
 def extract_rks_info(file_input: Union[str, Path, bytes, io.BytesIO], filename: str = "") -> Dict[str, Any]:
@@ -121,7 +122,10 @@ def extract_rks_info(file_input: Union[str, Path, bytes, io.BytesIO], filename: 
         f"Lingkup Pekerjaan Utama:\n" + ("\n".join(scope_snippets) if scope_snippets else text_clean[:1200])
     )
 
+    officer_data = extract_officials(file_input, filename)
+    issues.extend(officer_data.pop("officials_issues"))
     return {
+        **officer_data,
         "nama_pengadaan": title,
         "resiko_csms": csms,
         "context_summary": summary_text[:3000],

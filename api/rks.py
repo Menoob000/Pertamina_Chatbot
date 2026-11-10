@@ -24,6 +24,7 @@ class RKSSearchRequest(BaseModel):
     year: int | None = None
     version: str | None = None
     section: str | None = None
+    file_format: str | None = Field(default=None, pattern=r"^(pdf|docx)$")
     top_k: int = Field(default_factory=lambda: config.RKS_SEARCH_TOP_K, ge=1, le=50)
     score_threshold: float = Field(default_factory=lambda: config.RKS_SEARCH_SCORE_THRESHOLD, ge=0, le=1)
 
@@ -41,7 +42,7 @@ def search(payload: RKSSearchRequest):
     return search_evidence(payload.query, catalog,
                            filters={"document_type": payload.document_type,
                                     "year": payload.year, "version": payload.version,
-                                    "section": payload.section},
+                                    "section": payload.section, "file_format": payload.file_format},
                            top_k=payload.top_k, score_threshold=payload.score_threshold)
 
 

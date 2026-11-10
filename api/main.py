@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from tools.tender.generator import generate_tender_document, export_tender_to_docx, _active_tender_store
 from tools.tender.extractor import extract_rks_info, extract_boq_info
 from tools.tender.docx import OUTPUT_DIR
+from tools.tender.docx import render_contract_to_docx_bytes
+from tools.tender.contract_archive import ContractArchive
 from api.rks import router as rks_router
 
 load_dotenv()
@@ -47,25 +49,27 @@ app.add_middleware(
 
 class TenderGenerateRequest(BaseModel):
     nama_pengadaan: str = Field(min_length=1)
-    nomor_tender: str = Field(min_length=1)
-    tanggal: str = Field(min_length=1)
-    prime_cost: float = Field(gt=0)
-    total_dengan_kr: float = Field(gt=0)
-    resiko_csms: str = Field(pattern="^(Tinggi|Sedang|Rendah)$")
+    nomor_tender: str = ""
+    tanggal: str = ""
+    prime_cost: Optional[float] = Field(default=None, ge=0)
+    total_dengan_kr: Optional[float] = Field(default=None, ge=0)
+    resiko_csms: str = Field(default="", pattern="^(|Tinggi|Sedang|Rendah)$")
     tkdn_minimal: float = Field(ge=0, le=100)
-    pejabat_procurement_nama: str = Field(min_length=1)
-    pejabat_procurement_jabatan: str = Field(min_length=1)
-    pejabat_berwenang: str = Field(min_length=1)
-    pengawas_pekerjaan: str = Field(min_length=1)
-    metode_pemenuhan: str = Field(min_length=1)
-    jenis_kontrak: str = Field(min_length=1)
-    prebid_tanggal: str = Field(min_length=1)
-    prebid_waktu: str = Field(min_length=1)
-    prebid_tempat: str = Field(min_length=1)
-    pemasukan_mulai: str = Field(min_length=1)
-    pemasukan_selesai: str = Field(min_length=1)
+    pejabat_procurement_nama: str = ""
+    pejabat_procurement_jabatan: str = ""
+    pejabat_berwenang: str = ""
+    pengawas_pekerjaan: str = ""
+    officials: Optional[Dict[str, Dict[str, Any]]] = None
+    metode_pemenuhan: str = ""
+    jenis_kontrak: str = ""
+    prebid_tanggal: str = ""
+    prebid_waktu: str = ""
+    prebid_tempat: str = ""
+    pemasukan_mulai: str = ""
+    pemasukan_selesai: str = ""
     context_summary: Optional[str] = ""
     boq_items: Optional[List[Dict[str, Any]]] = None
+    rks_artifact_id: Optional[str] = None
     output_filename: Optional[str] = ""
 
 
@@ -74,7 +78,8 @@ def health_check():
     return {
         "status": "healthy",
         "service": "Pertamina Tender Generator API",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "features": {"contract_archive": True},
     }
 
 
@@ -123,6 +128,7 @@ async def extract_context(
             if not rks_file or hashlib.sha256(content).hexdigest() != hashlib.sha256(artifact_docx.read_bytes()).hexdigest():
                 rks_data.setdefault("issues", []).append("Berkas RKS tidak cocok dengan artifact; CSMS manifest diabaikan.")
             else:
+                rks_data["officials_project_key"] = f"rks:{rks_artifact_id}"
                 category = (manifest.get("csms_assessment") or {}).get("category")
                 if category in {"HIGH", "MIDDLE", "LOW"}:
                     rks_data["resiko_csms"] = {"HIGH": "Tinggi", "MIDDLE": "Sedang", "LOW": "Rendah"}[category]
@@ -151,6 +157,8 @@ async def extract_context(
         "status": "success",
         "nama_pengadaan": rks_data.get("nama_pengadaan") or "",
         "resiko_csms": rks_data.get("resiko_csms"),
+        "officials": rks_data.get("officials", {}),
+        "officials_project_key": rks_data.get("officials_project_key"),
         "prime_cost": boq_data.get("prime_cost"),
         "total_dengan_kr": boq_data.get("total_dengan_kr"),
         "boq_items": boq_data.get("items", []),
@@ -179,6 +187,17 @@ def generate_tender(payload: TenderGenerateRequest):
 
         # Convert request model to kwargs dictionary
         kwargs = payload.model_dump()
+        optional_fields = {
+            "HPS Prime Cost": payload.prime_cost,
+            "Total HPS": payload.total_dengan_kr,
+            "Nomor tender": payload.nomor_tender,
+            "Tanggal dokumen": payload.tanggal,
+            "Metode pemenuhan": payload.metode_pemenuhan,
+            "Jenis kontrak": payload.jenis_kontrak,
+            "Risiko CSMS": payload.resiko_csms,
+        }
+        missing_fields = [name for name, value in optional_fields.items()
+                          if not value or not str(value).strip()]
 
         # 1. Generate tender document draft via LLM
         msg = generate_tender_document.invoke(kwargs)
@@ -200,17 +219,37 @@ def generate_tender(payload: TenderGenerateRequest):
         # Extract file path
         file_path = export_msg.replace("📄 File: ", "").strip()
         filename = os.path.basename(file_path)
+        contract_id = None
+        contract_archive_warning = None
+        try:
+            rks_artifact_id = payload.rks_artifact_id
+            if rks_artifact_id:
+                from tools.rks.service import artifact_file
+                artifact_file(rks_artifact_id, "docx")
+            contract_id = ContractArchive().save(
+                project_name=payload.nama_pengadaan,
+                tender_filename=filename,
+                tender_sha256=hashlib.sha256(Path(file_path).read_bytes()).hexdigest(),
+                contract_docx=render_contract_to_docx_bytes(draft),
+                rks_artifact_id=rks_artifact_id,
+            )
+        except Exception as exc:
+            contract_archive_warning = f"Tender berhasil dibuat, tetapi rancangan kontrak belum tersimpan di gudang: {exc}"
 
         return {
             "status": "success",
-            "message": "Dokumen Tender berhasil dibuat secara lengkap!",
+            "message": ("Draft Dokumen Tender berhasil dibuat dengan placeholder."
+                        if missing_fields else "Dokumen Tender berhasil dibuat!"),
             "filename": filename,
             "filepath": file_path,
             "download_url": f"/api/tender/download/{filename}",
+            "contract_id": contract_id,
+            "contract_archive_warning": contract_archive_warning,
             "details": {
                 "nama_pengadaan": payload.nama_pengadaan,
                 "nomor_tender": payload.nomor_tender,
                 "resiko_csms": payload.resiko_csms,
+                "missing_fields": missing_fields,
                 "kriteria_teknis_count": len(draft.get("lampiran_2a_evaluasi_teknis", [])) if draft else 0
             }
         }

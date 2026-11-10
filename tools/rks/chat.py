@@ -32,6 +32,11 @@ def source_path(filename, title):
     return None
 
 
+def _source_locations(filename, title):
+    path = source_path(filename, title)
+    return {"source_path": path, "pdf_path": path if path and Path(path).suffix.lower() == ".pdf" else None}
+
+
 def current_document(messages):
     # A model answer summarizing a tool result must not hide the actual file.
     for message in reversed(messages):
@@ -44,7 +49,7 @@ def current_document(messages):
             title = source.get("filename", "Pembuatan RKS")
             return {"source": name, "content": "", "title": title,
                     "source_file": source.get("filename", ""),
-                    "pdf_path": source_path(title, title) if source else None,
+                    **(_source_locations(title, title) if source else {"pdf_path": None}),
                     "rks_result": result}
         if name in {"fetch_full_documents", "return_full_docs", "fetch_full_document"}:
             result = payload(message.content)
@@ -53,5 +58,5 @@ def current_document(messages):
                 title = result.get("title") or result.get("source_file") or "RKS referensi"
                 filename = result.get("source_file", "")
                 return {"source": name, "content": text, "title": title,
-                        "source_file": filename, "pdf_path": source_path(filename, title)}
+                        "source_file": filename, **_source_locations(filename, title)}
     return None

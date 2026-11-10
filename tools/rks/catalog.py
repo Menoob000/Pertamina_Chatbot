@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pymupdf
 import config
+from rag.source_reader import read_source
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -21,15 +22,20 @@ def tokens(text: str) -> set[str]:
 
 def list_sources(data_dir: Path = DATA_DIR) -> list[dict]:
     sources = []
-    for path in sorted(data_dir.glob("*.pdf")):
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in sorted(Path(data_dir).iterdir()) if Path(data_dir).is_dir() else []:
+        if path.suffix.lower() not in {".pdf", ".docx"} or path.name.startswith("~$"):
+            continue
         try:
-            with pymupdf.open(path) as pdf:
-                text = "\n".join(pdf[i].get_text() for i in range(min(3, len(pdf))))
-                sources.append({
-                    "source_id": digest[:24], "sha256": digest, "filename": path.name,
-                    "pages": len(pdf), "search_text": text, "path": str(path.resolve()),
-                })
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            structure = read_source(path)
+            text = "\n".join(block["text"] for block in structure["blocks"])[:18000]
+            if not text.strip() and structure["format"] == "docx":
+                continue
+            sources.append({
+                "source_id": digest[:24], "sha256": digest, "filename": path.name,
+                "pages": structure["pages"], "file_format": structure["format"],
+                "search_text": text, "path": str(path.resolve()),
+            })
         except Exception:
             # Unreadable files cannot become a valid candidate.
             continue

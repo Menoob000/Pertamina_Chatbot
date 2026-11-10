@@ -14,6 +14,7 @@ Renders the complete formal tender package:
 
 import os
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -28,6 +29,10 @@ from .static_content import (
     BAB_II_ARTICLES,
     CSMS_MATRIX_DATA,
     CONTRACT_ARTICLES,
+)
+from .placeholders import (
+    NOMOR_TENDER, TANGGAL_DOKUMEN, METODE_PEMENUHAN, JENIS_KONTRAK,
+    HPS_PRIME_COST, HPS_TOTAL,
 )
 
 # ──────────────────────────────────────────────────────────────
@@ -133,7 +138,9 @@ def _add_dropdown_control(paragraph, label: str, options: List[str], current_val
     Insert a Word Content Control Dropdown List (<w:dropDownList>) into a paragraph.
     Allows users in Microsoft Word to click and select an option from a dropdown list.
     """
-    val = current_value if current_value and current_value in options else (options[0] if options else "")
+    if current_value and current_value not in options:
+        options = [current_value, *options]
+    val = current_value if current_value else (options[0] if options else "")
     tag_val = label.lower().replace(" ", "_")
     
     label_esc = _escape_xml(label)
@@ -167,7 +174,7 @@ def _add_dropdown_control(paragraph, label: str, options: List[str], current_val
     paragraph._p.append(parse_xml(sdt_xml))
 
 
-def _add_date_picker_control(paragraph, label: str, current_date_str: str = "Senin, 08 Desember 2025"):
+def _add_date_picker_control(paragraph, label: str, current_date_str: str = ""):
     """
     Insert a Word Content Control Date Picker (<w:date>) into a paragraph.
     Allows users in Microsoft Word to click the dropdown arrow to pick a date from an interactive calendar.
@@ -374,8 +381,8 @@ def _render_cover_page(doc: Document, tender_data: dict):
                    alignment=WD_ALIGN_PARAGRAPH.CENTER, space_after=24)
 
     # Nomor dan Tanggal
-    nomor = cover.get("nomor_tender", "No.Project/DT/PND970000/2026-S7")
-    tanggal = cover.get("tanggal", "04 Desember 2025")
+    nomor = cover.get("nomor_tender") or NOMOR_TENDER
+    tanggal = cover.get("tanggal") or TANGGAL_DOKUMEN
     _add_paragraph(doc, f"Nomor. {nomor}", font_size=13, bold=True,
                    alignment=WD_ALIGN_PARAGRAPH.CENTER, space_after=6)
     _add_paragraph(doc, f"Tanggal {tanggal}", font_size=12, bold=False,
@@ -398,7 +405,7 @@ def _render_cover_page(doc: Document, tender_data: dict):
     r0_1.font.name = "Arial"
     r0_1.font.size = Pt(10)
     r0_1.font.bold = True
-    r0_2 = p_sig0.add_run(pejabat.get("jabatan_2", "Area Manager Procurement Kalimantan"))
+    r0_2 = p_sig0.add_run(pejabat.get("jabatan_2") or "[Jabatan Pejabat Procurement]")
     r0_2.font.name = "Arial"
     r0_2.font.size = Pt(10)
 
@@ -412,7 +419,7 @@ def _render_cover_page(doc: Document, tender_data: dict):
     p_sig1 = c1.paragraphs[0]
     p_sig1.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_sig1.paragraph_format.space_before = Pt(40)
-    r1 = p_sig1.add_run(pejabat.get("nama", "Rigga Widar Atmagi"))
+    r1 = p_sig1.add_run(pejabat.get("nama") or "[Nama Pejabat Procurement]")
     r1.font.name = "Arial"
     r1.font.size = Pt(11)
     r1.font.bold = True
@@ -657,7 +664,7 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
 
     csms_info = kk.get("syarat_kualifikasi_csms") or {}
     _add_row("6", "Syarat Kualifikasi CSMS", [
-        f"1. Pekerjaan memiliki risiko {csms_info.get('tingkat_risiko', 'Tinggi')} terkait aspek HSSE",
+        f"1. Pekerjaan memiliki risiko {csms_info.get('tingkat_risiko') or '[Risiko CSMS belum diisi]'} terkait aspek HSSE",
         f"2. Syarat kualifikasi CSMS bagi Peserta Tunggal adalah {csms_info.get('kualifikasi_minimal', 'Tinggi')}"
     ])
 
@@ -694,6 +701,7 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
         c8.paragraphs[0],
         label="Metode Pemenuhan Kebutuhan",
         options=[
+            METODE_PEMENUHAN,
             "Sinergi Pertamina Group dengan Penunjukan kepada EBPG",
             "Sinergi Pertamina Group dengan Penugasan kepada EBPG",
             "Sinergi Pertamina Group dengan Pemilihan Langsung antar EBPG",
@@ -703,10 +711,10 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
             "Tender Praktis",
             "Penunjukan Langsung"
         ],
-        current_value=kk.get("metode_pemenuhan", "Tender Terbatas")
+        current_value=kk.get("metode_pemenuhan") or METODE_PEMENUHAN
     )
-    _add_row("9", "Pejabat Berwenang", kk.get("pejabat_berwenang", "Sr. Manager Opt. & Maint. Regional Kalimantan"))
-    _add_row("10", "Pengawas Pekerjaan/Wakil Perusahaan", kk.get("pengawas_pekerjaan", "Region Manager RPD Regional Kalimantan"))
+    _add_row("9", "Pejabat Berwenang", kk.get("pejabat_berwenang") or "[Nama/Jabatan Pejabat Berwenang]")
+    _add_row("10", "Pengawas Pekerjaan/Wakil Perusahaan", kk.get("pengawas_pekerjaan") or "[Nama/Jabatan Pengawas Pekerjaan]")
 
     # Row 11: Pre-bid meeting with interactive Date Picker Dropdown in table
     prebid = kk.get("jadwal_prebid") or {}
@@ -752,20 +760,20 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
     _add_date_picker_control(
         p_date,
         label="Pilih Hari Tanggal Pre-Bid",
-        current_date_str=prebid.get("hari_tanggal", "Senin, 08 Desember 2025")
+        current_date_str=prebid.get("hari_tanggal") or ""
     )
 
     p_time = r1_cells[2].paragraphs[0]
     p_time.paragraph_format.space_before = Pt(0)
     p_time.paragraph_format.space_after = Pt(0)
-    r_time = p_time.add_run(prebid.get("waktu", "10.00 WITA"))
+    r_time = p_time.add_run(prebid.get("waktu") or "")
     r_time.font.name = "Arial"
     r_time.font.size = Pt(8.5)
 
     p_place = r1_cells[3].paragraphs[0]
     p_place.paragraph_format.space_before = Pt(0)
     p_place.paragraph_format.space_after = Pt(0)
-    r_place = p_place.add_run(prebid.get("tempat", "Microsoft Teams Meeting"))
+    r_place = p_place.add_run(prebid.get("tempat") or "")
     r_place.font.name = "Arial"
     r_place.font.size = Pt(8.5)
 
@@ -779,12 +787,27 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
 
     # Row 12: Pemasukan Penawaran
     pemasukan = kk.get("jadwal_pemasukan") or {}
-    _add_row("12", "Tahapan Pemasukan Penawaran", [
-        "Penyampaian Dokumen Penawaran dilaksanakan pada:",
-        f"Mulai dari   : {pemasukan.get('mulai_hari_tanggal', 'Senin, 08 Desember 2025')} ({pemasukan.get('mulai_waktu', '09.00 WITA')})",
-        f"Sampai dengan: {pemasukan.get('selesai_hari_tanggal', 'Senin, 15 Desember 2025')} ({pemasukan.get('selesai_waktu', '16.00 WITA')})",
-        f"Tempat/Portal: {pemasukan.get('tempat_portal', 'https://smart.gep.com')}"
-    ])
+    c12 = _add_row("12", "Tahapan Pemasukan Penawaran", "")
+    schedule = c12.add_table(rows=3, cols=4)
+    schedule.alignment = WD_TABLE_ALIGNMENT.CENTER
+    schedule_rows = [
+        ["Tahapan / Kegiatan", "Hari, Tanggal", "Waktu", "Tempat / Media"],
+        ["Awal pemasukan penawaran", pemasukan.get("mulai_hari_tanggal") or "",
+         pemasukan.get("mulai_waktu") or "", pemasukan.get("tempat_portal") or ""],
+        ["Akhir pemasukan penawaran", pemasukan.get("selesai_hari_tanggal") or "",
+         pemasukan.get("selesai_waktu") or "", pemasukan.get("tempat_portal") or ""],
+    ]
+    for row_index, values in enumerate(schedule_rows):
+        for column, value in enumerate(values):
+            cell = schedule.cell(row_index, column)
+            _set_cell_margins(cell, top=60, bottom=60, left=80, right=80)
+            _set_cell_border(cell, **border_kwargs)
+            if row_index == 0:
+                _set_cell_shading(cell, COLOR_HEADER_BG)
+            run = cell.paragraphs[0].add_run(value)
+            run.font.name = "Arial"
+            run.font.size = Pt(8.5)
+            run.font.bold = row_index == 0
 
     # Row 13 to 22
     # 13. Masa berlaku Dokumen Penawaran (Dropdown)
@@ -924,7 +947,7 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
     # Row 25: HSSE Plan
     hsse_info = kk.get("evaluasi_hsse_plan") or {}
     _add_row("25", "Persyaratan dan Evaluasi HSSE Plan", [
-        f"1. Penilaian risiko pekerjaan aspek HSSE: {hsse_info.get('tingkat_risiko', 'High Risk')}.",
+        f"1. Penilaian risiko pekerjaan aspek HSSE: {hsse_info.get('tingkat_risiko') or '[Risiko CSMS belum diisi]'}.",
         f"2. Metode Evaluasi HSSE Plan: {hsse_info.get('metode', 'Scoring')}.",
         f"3. Passing Grade: {hsse_info.get('passing_grade', 'Minimal 80% dalam skala 100%')}."
     ])
@@ -968,13 +991,14 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
         c27.paragraphs[0],
         label="Jenis Kontrak",
         options=[
+            JENIS_KONTRAK,
             "Gabungan Harga Satuan & Lumpsum",
             "Harga Lumpsum",
             "Harga Satuan",
             "Harga Satuan (setiap item tidak saling terkait)",
             "Harga Satuan (setiap item tidak saling terkait, untuk kebutuhan security of supply)"
         ],
-        current_value=kk.get("jenis_kontrak", "Gabungan Harga Satuan & Lumpsum")
+        current_value=kk.get("jenis_kontrak") or JENIS_KONTRAK
     )
 
     # 28. Jumlah Pemenang (Dropdown)
@@ -1002,11 +1026,12 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
         p29_intro,
         label="Tipe Kontrak HPS",
         options=[
+            JENIS_KONTRAK,
             "Gabungan Harga Satuan & Lumpsum",
             "Harga Lumpsum",
             "Harga Satuan"
         ],
-        current_value="Gabungan Harga Satuan & Lumpsum"
+        current_value=kk.get("jenis_kontrak") or JENIS_KONTRAK
     )
     r29_col = p29_intro.add_run(" :")
     r29_col.font.name = "Arial"
@@ -1025,8 +1050,8 @@ def _render_bab_i_ketentuan_khusus(doc: Document, tender_data: dict):
         r.font.bold = True
     
     hps_rows = [
-        ("1", "Total nilai Prime Cost", hps.get("prime_cost_str", "Rp13.283.434.534,00")),
-        ("2", "Total nilai Prime Cost + Keuntungan & Risiko", hps.get("total_dengan_kr_str", "Rp14.346.100.000,00"))
+        ("1", "Total nilai Prime Cost", hps.get("prime_cost_str") or HPS_PRIME_COST),
+        ("2", "Total nilai Prime Cost + Keuntungan & Risiko", hps.get("total_dengan_kr_str") or HPS_TOTAL)
     ]
     for row_idx, (no, jns, val) in enumerate(hps_rows, start=1):
         for col_idx, text_v in enumerate([no, jns, val]):
@@ -1662,7 +1687,7 @@ def _render_bagian_b_rancangan_kontrak(doc: Document, tender_data: dict):
     hps = (tender_data.get("ketentuan_khusus_ikpp") or {}).get("hps_oe") or {}
 
     judul_kontrak = rk_data.get("judul_pekerjaan", cover.get("nama_pengadaan", "PENGADAAN JASA / BARANG")).upper()
-    nomor_kontrak = rk_data.get("nomor_kontrak", "KTR-001/PND970000/2026-S7")
+    nomor_kontrak = rk_data.get("nomor_kontrak") or "[Nomor kontrak belum diisi]"
 
     # Contract Title Header
     _add_paragraph(doc, "PERJANJIAN PELAKSANAAN PEKERJAAN", font_size=14, bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, space_before=12, space_after=2)
@@ -1671,7 +1696,7 @@ def _render_bagian_b_rancangan_kontrak(doc: Document, tender_data: dict):
 
     # Opening Comparison / Parties
     komparisi = (
-        "Pada hari ini, ……………… tanggal ………… bulan ………… tahun Dua Ribu Dua Puluh Enam, bertempat di Balikpapan, "
+        "Pada hari ini, ……………… tanggal ………… bulan ………… tahun …………, bertempat di [Tempat penandatanganan belum diisi], "
         "yang bertanda tangan di bawah ini:\n\n"
         "I. PT PERTAMINA PATRA NIAGA, suatu perseroan terbatas yang didirikan berdasarkan hukum Republik Indonesia, "
         "berkedudukan di Jakarta, dalam hal ini diwakili oleh Senior Manager / General Manager yang bertindak berdasarkan "
@@ -1736,7 +1761,8 @@ def _render_bagian_b_rancangan_kontrak(doc: Document, tender_data: dict):
     # Names
     pn1 = sig_tab.cell(2, 0).paragraphs[0]
     pn1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    rn1 = pn1.add_run("_______________________________\nPejabat Berwenang Pertamina")
+    authorized = (tender_data.get("ketentuan_khusus_ikpp") or {}).get("pejabat_berwenang") or "[Nama/Jabatan Pejabat Berwenang]"
+    rn1 = pn1.add_run(authorized)
     rn1.font.name = "Arial"
     rn1.font.size = Pt(10)
     rn1.font.bold = True
@@ -1789,7 +1815,7 @@ def _render_bagian_b_rancangan_kontrak(doc: Document, tender_data: dict):
     cell_sp.width = Cm(8.0)
     p_sp = cell_sp.paragraphs[0]
     p_sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_sp = p_sp.add_run("PT PERTAMINA PATRA NIAGA\nPejabat Berwenang\n\n\n\n\n_______________________________")
+    r_sp = p_sp.add_run("PT PERTAMINA PATRA NIAGA\nPejabat Berwenang\n\n\n\n\n" + authorized)
     r_sp.font.name = "Arial"
     r_sp.font.size = Pt(10)
     r_sp.font.bold = True
@@ -1798,6 +1824,22 @@ def _render_bagian_b_rancangan_kontrak(doc: Document, tender_data: dict):
 # ──────────────────────────────────────────────────────────────
 # Main Render Function
 # ──────────────────────────────────────────────────────────────
+
+def render_contract_to_docx_bytes(tender_data: dict) -> bytes:
+    """Create a standalone, editable Bagian B from the same generated tender draft."""
+    doc = Document()
+    for section in doc.sections:
+        section.top_margin = Cm(2.5)
+        section.bottom_margin = Cm(2.5)
+        section.left_margin = Cm(2.5)
+        section.right_margin = Cm(2.5)
+    doc.styles["Normal"].font.name = "Arial"
+    doc.styles["Normal"].font.size = Pt(10)
+    _render_bagian_b_rancangan_kontrak(doc, tender_data)
+    output = BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
 
 def render_tender_to_docx(tender_data: dict, output_filename: str = "") -> str:
     """

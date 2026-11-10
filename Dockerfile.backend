@@ -10,6 +10,8 @@ COPY requirements.backend.txt ./
 RUN pip install --no-cache-dir -r requirements.backend.txt
 
 COPY api ./api
+COPY config.py ./config.py
+COPY rag ./rag
 COPY tools/tender ./tools/tender
 COPY tools/rks ./tools/rks
 COPY assets ./assets

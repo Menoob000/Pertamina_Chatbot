@@ -20,8 +20,13 @@ def _continue_to_tender(artifact_id: str) -> None:
     st.session_state["app_nav_radio_menu"] = "📑 Dokumen Tender Generator"
     for key in ("extraction_done", "tf_nama_pengadaan", "tf_resiko_csms",
                 "tf_prime_cost", "tf_total_kr", "tf_context_summary", "tf_boq_items",
-                "last_generated_tender", "uploader_boq_file", "chk_use_generated_rks"):
+                "last_generated_tender", "uploader_boq_file", "chk_use_generated_rks",
+                "tf_officials", "tf_officials_project_key", "tf_sources", "tf_issues",
+                "inp_final_outname", "_tender_suggested_filename", "_tender_saved_signature"):
         st.session_state.pop(key, None)
+    for key in list(st.session_state):
+        if key.startswith("tender_field_"):
+            st.session_state.pop(key, None)
 
 
 def render_result(result: dict, key: str = "rks", compact: bool = False):
@@ -54,7 +59,8 @@ def render_result(result: dict, key: str = "rks", compact: bool = False):
         for section in result.get("evidence", []):
             if section.get("sources"):
                 top = section["sources"][0]
-                st.caption(f"{section['section']}: {top['filename']}, halaman {top.get('page') or 'tidak tersedia'}, skor {top['score']}")
+                location = top.get("location") or (f"halaman {top['page']}" if top.get("page") else "lokasi tidak tersedia")
+                st.caption(f"{section['section']}: {top['filename']}, {location}, skor {top['score']}")
         for issue in result.get("issues", []):
             prefix = f"Halaman sumber {issue['page']}: " if issue.get("page") else ""
             st.write(prefix + issue["message"])
@@ -108,7 +114,7 @@ def render_chat_preview(document: dict, thread_id: str):
             st.error("Hasil RKS pada percakapan ini tidak tersedia. Buat ulang RKS dari sumbernya.")
         return
 
-    pdf_path = document.get("pdf_path")
+    pdf_path = document.get("source_path") or document.get("pdf_path")
     source = next((s for s in list_sources() if pdf_path and
                    Path(s["path"]).resolve() == Path(pdf_path).resolve()), None)
     if source is None:

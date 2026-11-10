@@ -311,6 +311,18 @@ def _list_kind(text: str, number_depth: int) -> str:
 
 
 def extract_text_document(source: dict, assets: Path | None = None) -> dict:
+    if Path(source["path"]).suffix.lower() == ".docx":
+        from rag.source_reader import read_source
+        structure = read_source(source["path"])
+        elements = structure["blocks"]
+        issues = [{"page": None, "message": message} for message in structure["issues"]]
+        return {"source": {k: v for k, v in source.items() if k != "search_text"},
+                "pages": [{"page": None, "source_text": "\n".join(e["text"] for e in elements),
+                           "elements": elements, "width": 595, "height": 842}],
+                "issues": issues, "heading_count": sum(e["kind"] == "heading" for e in elements),
+                "auxiliary": structure["auxiliary"], "source_image_count": structure["image_count"],
+                "mode": "docx_structure", "cover_logo": False,
+                "status": "perlu pemeriksaan" if issues else "lengkap"}
     pages, issues = [], []
     in_appendix = False
     with pymupdf.open(source["path"]) as pdf:

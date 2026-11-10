@@ -11,6 +11,9 @@ def validate_docx(extracted, path):
     images = 0
     for page in extracted["pages"]:
         for element in page["elements"]:
+            if extracted.get("mode") == "docx_structure":
+                expected.append(element.get("literal_text", element["text"]))
+                continue
             if element["kind"] in {"paragraph", "heading"}:
                 expected.append(element["text"])
             elif element["kind"] == "table" and element["editable"]:
@@ -18,6 +21,8 @@ def validate_docx(extracted, path):
             else:
                 images += 1
     document = Document(path)
+    if extracted.get("mode") == "docx_structure":
+        images = extracted.get("source_image_count", 0)
     if extracted.get("cover_logo"):
         images += 1
     actual = "\n".join(Paragraph(p, document).text for p in document.element.xpath('.//w:p'))

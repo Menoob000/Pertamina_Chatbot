@@ -4,7 +4,7 @@ import re
 
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -458,6 +458,30 @@ def _render_editable_layout(extracted: dict, output: Path, csms_assessment: dict
 
 
 def render_document(extracted: dict, output: Path, csms_assessment: dict | None = None) -> None:
+    if extracted.get("mode") == "docx_structure":
+        # Retain OOXML numbering, table grid/merges, images, cover and content controls.
+        # Reconstructing these from plain text would destroy the source structure.
+        source_document = Document(extracted["source"]["path"])
+        has_toc = any("TOC " in (node.text or "") for node in source_document.element.xpath('.//w:instrText'))
+        if extracted.get("heading_count") and not has_toc:
+            first_heading = next((p for p in source_document.paragraphs
+                                  if p.style.name.startswith("Heading")), None)
+            if first_heading is not None:
+                toc_title = source_document.add_paragraph("Daftar isi", "Title")
+                first_heading._p.addprevious(toc_title._p)
+                toc = source_document.add_paragraph()
+                _field(toc, 'TOC \\o "1-9" \\h \\z \\u')
+                first_heading._p.addprevious(toc._p)
+                page_break = source_document.add_paragraph()
+                page_break.add_run().add_break(WD_BREAK.PAGE)
+                first_heading._p.addprevious(page_break._p)
+        setting = OxmlElement("w:updateFields")
+        setting.set(qn("w:val"), "true")
+        source_document.settings.element.append(setting)
+        source_document.core_properties.comments = (
+            f"Sumber KB DOCX: {extracted['source']['filename']}; SHA256: {extracted['source']['sha256']}")
+        source_document.save(output)
+        return
     if extracted.get("mode") in {"text_only", "editable_layout"}:
         return _render_editable_layout(extracted, output, csms_assessment=csms_assessment)
     doc = Document()
