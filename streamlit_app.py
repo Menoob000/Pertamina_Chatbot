@@ -21,6 +21,8 @@ from tools.tender.streamlit_tender_view import render_tender_generator_page
 from tools.rks.streamlit_view import render_rks_page, render_chat_preview
 from tools.rks.library_view import render_rks_library
 from tools.tender.contract_library_view import render_contract_library
+from tools.amendment.streamlit_amendment_view import render_amendment_generator_page
+from tools.amendment.library_view import render_amendment_library
 from tools.rks.chat import current_document as select_chat_document
 from tools.docx_exporter import parse_text_to_rks_data
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR
@@ -673,6 +675,7 @@ def _close_rks_pages():
     st.session_state["show_rks_page"] = False
     st.session_state["show_rks_library"] = False
     st.session_state["show_contract_library"] = False
+    st.session_state["show_amendment_library"] = False
 
 
 with st.sidebar:
@@ -689,29 +692,48 @@ with st.sidebar:
         st.session_state["show_rks_page"] = True
         st.session_state["show_rks_library"] = False
         st.session_state["show_contract_library"] = False
+        st.session_state["show_amendment_library"] = False
     if st.button("Gudang RKS", key="open_rks_library", use_container_width=True):
         st.session_state["show_rks_library"] = True
         st.session_state["show_rks_page"] = False
         st.session_state["show_contract_library"] = False
+        st.session_state["show_amendment_library"] = False
     if st.button("Gudang Rancangan Kontrak", key="open_contract_library", use_container_width=True):
         st.session_state["show_contract_library"] = True
         st.session_state["show_rks_page"] = False
         st.session_state["show_rks_library"] = False
-    if st.session_state.get("show_rks_page") and st.button("Kembali ke chat / tender", key="close_rks_page"):
+        st.session_state["show_amendment_library"] = False
+    if st.button("Gudang Dokumen Amandemen", key="open_amendment_library", use_container_width=True):
+        st.session_state["show_amendment_library"] = True
         st.session_state["show_rks_page"] = False
-    if st.session_state.get("show_rks_library") and st.button("Kembali ke chat / tender", key="close_rks_library"):
         st.session_state["show_rks_library"] = False
-    if st.session_state.get("show_contract_library") and st.button("Kembali ke chat / tender", key="close_contract_library"):
         st.session_state["show_contract_library"] = False
+    if st.session_state.get("show_rks_page") and st.button("Kembali ke chat / generator", key="close_rks_page"):
+        st.session_state["show_rks_page"] = False
+    if st.session_state.get("show_rks_library") and st.button("Kembali ke chat / generator", key="close_rks_library"):
+        st.session_state["show_rks_library"] = False
+    if st.session_state.get("show_contract_library") and st.button("Kembali ke chat / generator", key="close_contract_library"):
+        st.session_state["show_contract_library"] = False
+    if st.session_state.get("show_amendment_library") and st.button("Kembali ke chat / generator", key="close_amendment_library"):
+        st.session_state["show_amendment_library"] = False
+
+    nav_index = 0
+    if st.session_state.get("nav_choice") == "tender":
+        nav_index = 1
+    elif st.session_state.get("nav_choice") == "amendment":
+        nav_index = 2
+
     nav_selection = st.radio(
         "Menu Navigasi",
-        ["💬 Chatbot & RKS Viewer", "📑 Dokumen Tender Generator"],
-        index=0 if st.session_state.get("nav_choice") != "tender" else 1,
+        ["💬 Chatbot & RKS Viewer", "📑 Dokumen Tender Generator", "📝 Dokumen Amendemen Generator"],
+        index=nav_index,
         key="app_nav_radio_menu",
         label_visibility="collapsed",
         on_change=_close_rks_pages,
     )
-    if "Tender" in nav_selection:
+    if "Amendemen" in nav_selection:
+        st.session_state.nav_choice = "amendment"
+    elif "Tender" in nav_selection:
         st.session_state.nav_choice = "tender"
     else:
         st.session_state.nav_choice = "chat"
@@ -835,6 +857,14 @@ if st.session_state.get("show_rks_library"):
 
 if st.session_state.get("show_contract_library"):
     render_contract_library()
+    st.stop()
+
+if st.session_state.get("show_amendment_library"):
+    render_amendment_library()
+    st.stop()
+
+if st.session_state.get("nav_choice") == "amendment":
+    render_amendment_generator_page()
     st.stop()
 
 if st.session_state.get("nav_choice") == "tender":
