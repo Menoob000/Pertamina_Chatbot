@@ -25,15 +25,41 @@ API_HOST = os.getenv("FASTAPI_HOST", "127.0.0.1")
 API_PORT = os.getenv("FASTAPI_PORT", "8000")
 FASTAPI_BASE_URL = os.getenv("FASTAPI_BASE_URL", f"http://{API_HOST}:{API_PORT}")
 
+_BACKEND_THREAD_STARTED = False
+
+
+def _ensure_backend_running() -> None:
+    global _BACKEND_THREAD_STARTED
+    if _BACKEND_THREAD_STARTED:
+        return
+    try:
+        import threading
+        import time
+        import uvicorn
+        from api.main import app as fastapi_app
+        t = threading.Thread(
+            target=uvicorn.run,
+            args=(fastapi_app,),
+            kwargs={"host": API_HOST, "port": int(API_PORT), "log_level": "warning"},
+            daemon=True,
+        )
+        t.start()
+        _BACKEND_THREAD_STARTED = True
+        time.sleep(1.2)
+    except Exception as exc:
+        print(f"Notice: Auto-start of FastAPI backend failed: {exc}")
+
 
 def check_api_status() -> tuple[bool, bool]:
-    try:
-        r = requests.get(f"{FASTAPI_BASE_URL}/api/health", timeout=2)
-        if r.status_code != 200:
-            return False, False
-        return True, bool((r.json().get("features") or {}).get("contract_archive"))
-    except Exception:
-        return False, False
+    for attempt in range(2):
+        try:
+            r = requests.get(f"{FASTAPI_BASE_URL}/api/health", timeout=2)
+            if r.status_code == 200:
+                return True, bool((r.json().get("features") or {}).get("contract_archive"))
+        except Exception:
+            if attempt == 0:
+                _ensure_backend_running()
+    return False, False
 
 
 def _render_preview_and_download(docx_data: bytes, filename: str, key: str) -> None:
