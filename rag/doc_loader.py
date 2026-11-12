@@ -26,6 +26,13 @@ PGVECTOR_DB = os.getenv("PGVECTOR_DB", "langchain")
 
 
 def default_connection():
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        if db_url.startswith("postgres://"):
+            return db_url.replace("postgres://", "postgresql+psycopg://", 1)
+        elif db_url.startswith("postgresql://"):
+            return db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return db_url
     from sqlalchemy import URL
     return URL.create("postgresql+psycopg", username=PGVECTOR_USER, password=PGVECTOR_PASSWORD,
                       host=PGVECTOR_HOST, port=PGVECTOR_PORT, database=PGVECTOR_DB).render_as_string(hide_password=False)
@@ -37,9 +44,14 @@ PGVECTOR_CONNECTION = default_connection()
 def _connect(connection):
     from sqlalchemy.engine import make_url
     url = make_url(connection)
-    return psycopg.connect(make_conninfo(host=url.host or PGVECTOR_HOST, port=url.port or PGVECTOR_PORT,
-                           dbname=url.database or PGVECTOR_DB, user=url.username or PGVECTOR_USER,
-                           password=url.password or PGVECTOR_PASSWORD), connect_timeout=5)
+    return psycopg.connect(
+        host=url.host or PGVECTOR_HOST,
+        port=url.port or PGVECTOR_PORT,
+        dbname=url.database or PGVECTOR_DB,
+        user=url.username or PGVECTOR_USER,
+        password=url.password or PGVECTOR_PASSWORD,
+        connect_timeout=10,
+    )
 
 
 def _initialize(conn):

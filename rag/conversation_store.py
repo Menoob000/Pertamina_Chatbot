@@ -16,13 +16,16 @@ class ConversationStore:
         self.single_user = single_user
 
     def _connect(self):
+        db_url = os.getenv("DATABASE_URL")
+        if db_url:
+            return psycopg.connect(db_url, connect_timeout=10)
         return psycopg.connect(
             host=os.getenv("PGVECTOR_HOST", "127.0.0.1"),
             port=int(os.getenv("PGVECTOR_PORT", "5432")),
             dbname=os.getenv("PGVECTOR_DB", "langchain"),
             user=os.getenv("PGVECTOR_USER", "langchain"),
             password=os.getenv("PGVECTOR_PASSWORD", "langchain"),
-            connect_timeout=3,
+            connect_timeout=10,
         )
 
     def initialize(self):

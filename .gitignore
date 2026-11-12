@@ -152,6 +152,10 @@ activemq-data/
 # Environments
 .env
 .envrc
+credentials.json
+token.json
+gdrive_config.json
+gdrive_sync_manifest.json
 .venv
 env/
 venv/

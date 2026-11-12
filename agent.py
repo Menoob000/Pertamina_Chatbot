@@ -18,6 +18,7 @@ from rag.vector_store import fetch_full_document, fetch_relevant_documents
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata
 from tools.rks.service import create_document
+from tools.amendment.tool import GenerateAmendmentDocumentTool
 import json
 
 load_dotenv()
@@ -111,7 +112,8 @@ class AgentState(TypedDict):
     full_docs : str
 
 
-tools = [search_tool, fetch_full_documents, fetch_relevant_documents, convert_pdf_to_docx, create_rks_document]
+generate_amendment_document = GenerateAmendmentDocumentTool()
+tools = [search_tool, fetch_full_documents, fetch_relevant_documents, convert_pdf_to_docx, create_rks_document, generate_amendment_document]
 
 llm = ChatOpenRouter(model=config.LLM_MODEL_NAME, api_key=os.environ.get('OPENROUTER_API_KEY'))
 llm_with_tools = llm.bind_tools(tools)
@@ -135,6 +137,8 @@ Gunakan tools yang tersedia sesuai aturan ketat berikut:
    - Gunakan jika informasi membutuhkan data regulasi eksternal terkini, harga pasar terbuka, atau tren industri luar yang belum tersedia di database internal.
 4. `convert_pdf_to_docx`: 
    - Gunakan saat pengguna meminta ekspor, unduh, atau konversi dokumen ke format Microsoft Word (.docx) resmi Pertamina.
+5. `generate_amendment_document`:
+   - Gunakan saat pengguna meminta untuk membuat, menyusun, atau men-generate dokumen amandemen kontrak (pokok-pokok kontrak amandemen) dari kontrak yang tersimpan di sistem.
 </tools_and_routing_logic>
 
 <response_guidelines>
