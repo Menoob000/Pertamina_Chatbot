@@ -281,6 +281,58 @@ st.html(
     div[data-testid="stChatInput"] {
         border-radius: 16px !important;
     }
+
+    /* Sidebar conversation rows & hover delete button */
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] {
+        position: relative;
+        align-items: center !important;
+        margin-bottom: 2px !important;
+    }
+
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] div[data-testid="column"]:first-child button {
+        text-align: left !important;
+        justify-content: flex-start !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] div[data-testid="column"]:first-child button p {
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+    }
+
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] div[data-testid="column"]:last-child {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] div[data-testid="column"]:last-child button {
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.2s ease, visibility 0.2s ease, background-color 0.15s ease, color 0.15s ease;
+        border: none !important;
+        background: transparent !important;
+        color: #94A3B8 !important;
+        font-size: 0.95rem !important;
+        font-weight: 700 !important;
+        padding: 0 !important;
+        min-height: 38px !important;
+        height: 38px !important;
+        border-radius: 6px !important;
+    }
+
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"]:hover div[data-testid="column"]:last-child button,
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] div[data-testid="column"]:last-child button:focus {
+        opacity: 1;
+        visibility: visible;
+    }
+
+    section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] div[data-testid="column"]:last-child button:hover {
+        color: #ED1C24 !important;
+        background-color: #FEE2E2 !important;
+    }
     </style>
     """),
 )
@@ -351,7 +403,7 @@ def init_session_state():
         st.session_state.prefilled_prompt = None
 
     if "show_split_viewer" not in st.session_state:
-        st.session_state.show_split_viewer = True
+        st.session_state.show_split_viewer = False
 
     if "dialog_converted_file" not in st.session_state:
         st.session_state.dialog_converted_file = None
@@ -382,6 +434,24 @@ def create_new_thread():
     st.session_state.current_thread_id = new_id
     st.query_params["chat_thread"] = new_id
     st.session_state.active_tool_now = None
+
+
+def delete_thread_by_id(thread_id: str):
+    """Delete a thread from database and session state."""
+    if chat_store:
+        try:
+            chat_store.delete_thread(thread_id)
+        except Exception as e:
+            logger.warning(f"Error deleting thread {thread_id} from DB: {e}")
+    if thread_id in st.session_state.threads:
+        del st.session_state.threads[thread_id]
+
+    if len(st.session_state.threads) == 0:
+        create_new_thread()
+    elif st.session_state.current_thread_id == thread_id:
+        st.session_state.current_thread_id = list(st.session_state.threads.keys())[0]
+        st.query_params["chat_thread"] = st.session_state.current_thread_id
+        st.session_state.active_tool_now = None
 
 
 def get_thread_messages(thread_id: str):
@@ -575,6 +645,23 @@ def open_pdf_converter_dialog(pdf_path: str, doc_title: str):
             )
 
 
+@st.dialog("Konfirmasi Hapus Percakapan")
+def confirm_delete_thread_dialog(thread_id: str, thread_title: str):
+    """Popup modal dialog to confirm chat thread deletion."""
+    st.markdown("Apakah Anda yakin ingin menghapus percakapan berikut?")
+    st.markdown(f"#### 💬 **{thread_title}**")
+    st.caption("⚠️ Riwayat chat dalam percakapan ini akan dihapus secara permanen.")
+    st.write("")
+    col_cancel, col_del = st.columns([1, 1])
+    with col_cancel:
+        if st.button("Batal", key=f"cancel_del_{thread_id}", use_container_width=True):
+            st.rerun()
+    with col_del:
+        if st.button("🗑️ Hapus", type="primary", key=f"confirm_del_{thread_id}", use_container_width=True):
+            delete_thread_by_id(thread_id)
+            st.rerun()
+
+
 AVATAR_ASSISTANT = "assets/logo_pertamina.png" if os.path.exists("assets/logo_pertamina.png") else "🤖"
 AVATAR_USER = "👤"
 
@@ -644,95 +731,95 @@ with st.sidebar:
         is_active = (t_id == current_thread_id)
 
         button_label = f"{'🔹 ' if is_active else '💬 '}{thread_info['title']}"
-        if st.button(
-            button_label,
-            key=f"thread_select_btn_{t_id}",
-            use_container_width=True,
-            type="primary" if is_active else "secondary",
-        ):
-            st.session_state.current_thread_id = t_id
-            st.query_params["chat_thread"] = t_id
-            st.rerun()
+        col_thread, col_del = st.columns([5.3, 1.1], gap="small", vertical_alignment="center")
+        with col_thread:
+            if st.button(
+                button_label,
+                key=f"thread_select_btn_{t_id}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state.current_thread_id = t_id
+                st.query_params["chat_thread"] = t_id
+                st.rerun()
+        with col_del:
+            if st.button("✕", key=f"btn_del_thread_{t_id}", help="Hapus percakapan", use_container_width=True):
+                confirm_delete_thread_dialog(t_id, thread_info["title"])
 
     st.write("")
     st.divider()
 
-    # Active Thread Settings
-    with st.expander("⚙️ Current Session Settings", expanded=False):
-        st.text(f"Thread: {current_thread_id}")
-        new_title = st.text_input("Rename Session", value=current_thread["title"], key="rename_title_input")
-        if st.button("Save Name", key="btn_save_thread_name", use_container_width=True):
-            if new_title.strip():
-                if chat_store:
-                    chat_store.rename_thread(current_thread_id, new_title.strip())
-                st.session_state.threads[current_thread_id]["title"] = new_title.strip()
-                st.rerun()
+    # Outer tag details: Pengaturan Tambahan containing individual expandable elements
+    with st.expander("Pengaturan Tambahan", expanded=False):
+        # 1. Current Session Settings Element
+        with st.expander("⚙️ Current Session Settings", expanded=False):
+            st.text(f"Thread: {current_thread_id}")
+            new_title = st.text_input("Rename Session", value=current_thread["title"], key="rename_title_input")
+            if st.button("Save Name", key="btn_save_thread_name", use_container_width=True):
+                if new_title.strip():
+                    if chat_store:
+                        chat_store.rename_thread(current_thread_id, new_title.strip())
+                    st.session_state.threads[current_thread_id]["title"] = new_title.strip()
+                    st.rerun()
 
-        if len(st.session_state.threads) > 1:
             if st.button("🗑️ Delete Session", key="btn_delete_current_thread", use_container_width=True):
-                if chat_store:
-                    chat_store.delete_thread(current_thread_id)
-                del st.session_state.threads[current_thread_id]
-                st.session_state.current_thread_id = list(st.session_state.threads.keys())[0]
-                st.query_params["chat_thread"] = st.session_state.current_thread_id
-                st.rerun()
+                confirm_delete_thread_dialog(current_thread_id, current_thread["title"])
 
-    # Database PDF Converter Shortcut in Sidebar
-    all_repo_pdfs = list(DATA_DIR.glob("*.pdf")) if DATA_DIR.exists() else []
-    if all_repo_pdfs:
-        with st.expander("🔄 Convert Any Repository PDF", expanded=False):
-            st.caption("Select any PDF from the repository database to convert via popup dialog:")
-            pdf_options = {p.name: str(p.resolve()) for p in all_repo_pdfs}
-            selected_pdf_name = st.selectbox("Choose PDF", list(pdf_options.keys()), key="sidebar_pdf_selector")
-            if st.button("Open Conversion Popup", key="btn_open_sidebar_dialog", use_container_width=True):
-                open_pdf_converter_dialog(pdf_options[selected_pdf_name], selected_pdf_name)
+        # 2. Agent Capabilities Element
+        with st.expander("⚡ Agent Capabilities", expanded=False):
+            if st.session_state.active_tool_now:
+                st.html(
+                    f"<div style='padding:6px 10px; background:#EFF6FF; border:1px solid #BFDBFE; border-radius:6px; font-size:0.8rem; color:#0072CE; font-weight:600; margin-bottom:8px;'>"
+                    f"⚡ Running: <code>{st.session_state.active_tool_now}</code></div>",
+                )
+            else:
+                st.html(
+                    "<div style='padding:6px 10px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px; font-size:0.8rem; color:#475569; font-weight:600; margin-bottom:8px;'>"
+                    "🟢 Agent Status: Ready</div>",
+                )
 
-    # Agent Tools Section
-    st.html("<p style='font-size:0.75rem; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Agent Capabilities</p>")
+            st.caption("Available Tools:")
+            for t in tools:
+                t_name = getattr(t, "name", str(t))
+                t_desc = getattr(t, "description", "")
+                is_convert = "convert" in t_name or "docx" in t_name
+                badge_class = "tool-badge-red" if is_convert else "tool-badge-blue"
+                st.html(
+                    f"<div style='margin-bottom:6px;'>"
+                    f"<span class='{badge_class}'>● {t_name}</span><br>"
+                    f"<span style='font-size:0.75rem; color:#64748B;'>{t_desc.strip().splitlines()[0][:70]}</span>"
+                    f"</div>",
+                )
 
-    if st.session_state.active_tool_now:
-        st.html(
-            f"<div style='padding:6px 10px; background:#EFF6FF; border:1px solid #BFDBFE; border-radius:6px; font-size:0.8rem; color:#0072CE; font-weight:600; margin-bottom:8px;'>"
-            f"⚡ Running: <code>{st.session_state.active_tool_now}</code></div>",
-        )
-    else:
-        st.html(
-            "<div style='padding:6px 10px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px; font-size:0.8rem; color:#475569; font-weight:600; margin-bottom:8px;'>"
-            "🟢 Agent Status: Ready</div>",
-        )
+        # 3. Database PDF Converter Shortcut Element
+        all_repo_pdfs = list(DATA_DIR.glob("*.pdf")) if DATA_DIR.exists() else []
+        if all_repo_pdfs:
+            with st.expander("🔄 Convert Any Repository PDF", expanded=False):
+                st.caption("Select any PDF from the repository database to convert via popup dialog:")
+                pdf_options = {p.name: str(p.resolve()) for p in all_repo_pdfs}
+                selected_pdf_name = st.selectbox("Choose PDF", list(pdf_options.keys()), key="sidebar_pdf_selector")
+                if st.button("Open Conversion Popup", key="btn_open_sidebar_dialog", use_container_width=True):
+                    open_pdf_converter_dialog(pdf_options[selected_pdf_name], selected_pdf_name)
 
-    with st.expander("🔧 Available Agent Tools", expanded=False):
-        for t in tools:
-            t_name = getattr(t, "name", str(t))
-            t_desc = getattr(t, "description", "")
-            is_convert = "convert" in t_name or "docx" in t_name
-            badge_class = "tool-badge-red" if is_convert else "tool-badge-blue"
-            st.html(
-                f"<div style='margin-bottom:6px;'>"
-                f"<span class='{badge_class}'>● {t_name}</span><br>"
-                f"<span style='font-size:0.75rem; color:#64748B;'>{t_desc.strip().splitlines()[0][:70]}</span>"
-                f"</div>",
-            )
-
-    # Exported Documents in ./output/
-    output_dir = Path("./output")
-    if output_dir.exists():
-        docx_files = sorted(list(output_dir.glob("*.docx")), key=os.path.getmtime, reverse=True)
-        if docx_files:
-            with st.expander(f"📁 Converted Documents ({len(docx_files)})", expanded=True):
-                for f_idx, docx_file in enumerate(docx_files[:4]):
-                    f_name = docx_file.name
-                    f_size = docx_file.stat().st_size / 1024
-                    st.html(f"<span style='font-size:0.82rem; font-weight:600;'>📄 {f_name[:24]}...</span> <span style='font-size:0.75rem; color:#64748B;'>({f_size:.1f} KB)</span>")
-                    with open(docx_file, "rb") as df:
-                        st.download_button(
-                            label="⬇️ Download",
-                            data=df.read(),
-                            file_name=f_name,
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            key=f"sidebar_dl_{f_idx}_{f_name}",
-                            use_container_width=True,
-                        )
+        # 4. Converted Documents Element
+        output_dir = Path("./output")
+        if output_dir.exists():
+            docx_files = sorted(list(output_dir.glob("*.docx")), key=os.path.getmtime, reverse=True)
+            if docx_files:
+                with st.expander(f"📁 Converted Documents ({len(docx_files)})", expanded=False):
+                    for f_idx, docx_file in enumerate(docx_files[:4]):
+                        f_name = docx_file.name
+                        f_size = docx_file.stat().st_size / 1024
+                        st.html(f"<span style='font-size:0.82rem; font-weight:600;'>📄 {f_name[:24]}...</span> <span style='font-size:0.75rem; color:#64748B;'>({f_size:.1f} KB)</span>")
+                        with open(docx_file, "rb") as df:
+                            st.download_button(
+                                label="⬇️ Download",
+                                data=df.read(),
+                                file_name=f_name,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"sidebar_dl_{f_idx}_{f_name}",
+                                use_container_width=True,
+                            )
 
 
 # ---------------------------------------------------------------------------
