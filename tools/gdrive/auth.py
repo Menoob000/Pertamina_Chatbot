@@ -24,8 +24,36 @@ CREDENTIALS_PATH = Path("credentials.json")
 TOKEN_PATH = Path("token.json")
 
 
+def _sync_credentials_from_secrets() -> None:
+    """Ensure credentials.json and token.json are written to disk if provided via environment or Streamlit secrets."""
+    if not CREDENTIALS_PATH.exists():
+        creds_json = os.getenv("GDRIVE_CREDENTIALS_JSON")
+        if not creds_json:
+            try:
+                import streamlit as st
+                if "GDRIVE_CREDENTIALS_JSON" in st.secrets:
+                    creds_json = str(st.secrets["GDRIVE_CREDENTIALS_JSON"])
+            except Exception:
+                pass
+        if creds_json:
+            CREDENTIALS_PATH.write_text(creds_json.strip(), encoding="utf-8")
+
+    if not TOKEN_PATH.exists():
+        token_json = os.getenv("GDRIVE_TOKEN_JSON")
+        if not token_json:
+            try:
+                import streamlit as st
+                if "GDRIVE_TOKEN_JSON" in st.secrets:
+                    token_json = str(st.secrets["GDRIVE_TOKEN_JSON"])
+            except Exception:
+                pass
+        if token_json:
+            TOKEN_PATH.write_text(token_json.strip(), encoding="utf-8")
+
+
 def get_auth_status() -> Dict[str, Any]:
     """Check whether credentials.json exists and if a valid token.json is present."""
+    _sync_credentials_from_secrets()
     has_creds = CREDENTIALS_PATH.exists()
     has_token = TOKEN_PATH.exists()
     is_valid = False

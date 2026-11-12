@@ -498,7 +498,7 @@ python-oxmsg==0.0.2
     # via docling-slim
 python-pptx==1.0.2
     # via docling-slim
-pywin32==312
+pywin32==312; sys_platform == 'win32'
     # via
     #   pertamina-chatbot (pyproject.toml)
     #   docling-parse
