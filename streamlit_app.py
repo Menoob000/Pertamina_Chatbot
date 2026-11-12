@@ -23,7 +23,12 @@ from tools.rks.library_view import render_rks_library
 from tools.tender.contract_library_view import render_contract_library
 from tools.amendment.streamlit_amendment_view import render_amendment_generator_page
 from tools.amendment.library_view import render_amendment_library
-from tools.gdrive.streamlit_view import render_gdrive_settings_section
+try:
+    from tools.gdrive.streamlit_view import render_gdrive_settings_section
+except Exception:
+    def render_gdrive_settings_section():
+        st.markdown("**☁️ Integrasi Google Drive**")
+        st.info("Pustaka Google Drive belum selesai diinstal di server cloud. Silakan Clear cache and deploy di Streamlit Cloud.")
 from tools.rks.chat import current_document as select_chat_document
 from tools.docx_exporter import parse_text_to_rks_data
 from tools.pdf_converter import find_matching_pdf, convert_pdf_to_docx_layout, get_pdf_metadata, DATA_DIR

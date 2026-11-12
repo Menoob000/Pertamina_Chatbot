@@ -19,6 +19,13 @@ def render_gdrive_settings_section():
     auth_status = get_auth_status()
     cfg = load_gdrive_config()
 
+    if auth_status.get("library_missing"):
+        st.warning(
+            "⚠️ Pustaka Google API belum terpasang di container server.\n\n"
+            "Silakan klik **Manage app > ⋮ (titik tiga) > Clear cache and deploy** di pojok kanan bawah Streamlit Cloud."
+        )
+        return
+
     if not auth_status["has_credentials_file"]:
         st.warning(
             "⚠️ Berkas `credentials.json` belum ditemukan di direktori proyek.\n\n"

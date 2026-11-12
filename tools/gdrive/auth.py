@@ -8,10 +8,21 @@ from typing import Optional, Dict, Any
 # Allow oauthlib to proceed when scopes are adjusted by the authorization server
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build, Resource
+try:
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build, Resource
+    GOOGLE_AUTH_AVAILABLE = True
+    GOOGLE_AUTH_ERROR = None
+except ImportError as _g_err:
+    Request = None
+    Credentials = None
+    InstalledAppFlow = None
+    build = None
+    Resource = Any
+    GOOGLE_AUTH_AVAILABLE = False
+    GOOGLE_AUTH_ERROR = str(_g_err)
 
 # Scope for reading files and metadata from Google Drive
 SCOPES = [
@@ -53,6 +64,16 @@ def _sync_credentials_from_secrets() -> None:
 
 def get_auth_status() -> Dict[str, Any]:
     """Check whether credentials.json exists and if a valid token.json is present."""
+    if not GOOGLE_AUTH_AVAILABLE:
+        return {
+            "is_authenticated": False,
+            "has_credentials_file": False,
+            "token_exists": False,
+            "email": None,
+            "error": f"Pustaka Google API belum terpasang di environment server: {GOOGLE_AUTH_ERROR}",
+            "library_missing": True,
+        }
+
     _sync_credentials_from_secrets()
     has_creds = CREDENTIALS_PATH.exists()
     has_token = TOKEN_PATH.exists()
