@@ -17,12 +17,49 @@ except Exception as exc:
     # incomplete (for example, OPENROUTER_API_KEY is not configured yet).
     app, tools = None, []
     AGENT_IMPORT_ERROR = str(exc)
-from tools.tender.streamlit_tender_view import render_tender_generator_page
-from tools.rks.streamlit_view import render_rks_page, render_chat_preview
-from tools.rks.library_view import render_rks_library
-from tools.tender.contract_library_view import render_contract_library
-from tools.amendment.streamlit_amendment_view import render_amendment_generator_page
-from tools.amendment.library_view import render_amendment_library
+try:
+    from tools.tender.streamlit_tender_view import render_tender_generator_page
+except Exception:
+    try:
+        import importlib
+        import tools.tender.streamlit_tender_view as _tv
+        importlib.reload(_tv)
+        render_tender_generator_page = _tv.render_tender_generator_page
+    except Exception as _tv_err:
+        def render_tender_generator_page(*args, **kwargs):
+            st.error(f"Gagal memuat modul Tender Generator: {_tv_err}")
+
+try:
+    from tools.rks.streamlit_view import render_rks_page, render_chat_preview
+except Exception:
+    def render_rks_page(*args, **kwargs):
+        st.error("Gagal memuat modul RKS Generator.")
+    def render_chat_preview(*args, **kwargs):
+        pass
+
+try:
+    from tools.rks.library_view import render_rks_library
+except Exception:
+    def render_rks_library(*args, **kwargs):
+        st.error("Gagal memuat modul Gudang RKS.")
+
+try:
+    from tools.tender.contract_library_view import render_contract_library
+except Exception:
+    def render_contract_library(*args, **kwargs):
+        st.error("Gagal memuat modul Gudang Kontrak.")
+
+try:
+    from tools.amendment.streamlit_amendment_view import render_amendment_generator_page
+except Exception:
+    def render_amendment_generator_page(*args, **kwargs):
+        st.error("Gagal memuat modul Amandemen Generator.")
+
+try:
+    from tools.amendment.library_view import render_amendment_library
+except Exception:
+    def render_amendment_library(*args, **kwargs):
+        st.error("Gagal memuat modul Gudang Amandemen.")
 try:
     from tools.gdrive.streamlit_view import render_gdrive_settings_section
 except Exception:
