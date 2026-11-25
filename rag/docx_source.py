@@ -38,7 +38,8 @@ class Numbering:
     def __init__(self, document):
         try:
             self.root = document.part.numbering_part.element
-        except KeyError:
+        except (KeyError, NotImplementedError):
+            # Dokumen tanpa numbering.xml: python-docx melempar NotImplementedError (versi lama: KeyError).
             self.root = None
         self.counts = {}
 

@@ -86,10 +86,12 @@ def loader(file_path="./data", connection=PGVECTOR_CONNECTION, *, collection_nam
             ids = []
             try:
                 raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+                # Dedup berdasarkan isi, bukan path: dokumen yang sama bisa di-index dari mesin lain
+                # (mis. path Windows di laptop vs /app/data di container) dan tidak boleh tersimpan dobel.
                 existing = conn.execute("""
-                    SELECT id FROM documents WHERE source_path = %s AND source_sha256 = %s
+                    SELECT id FROM documents WHERE source_sha256 = %s
                     AND collection_name = %s AND is_active
-                """, (str(path), raw_hash, collection_name)).fetchone()
+                """, (raw_hash, collection_name)).fetchone()
                 if existing:
                     report["skipped"].append({"filename": path.name, "reason": "isi belum berubah"})
                     continue
@@ -109,9 +111,11 @@ def loader(file_path="./data", connection=PGVECTOR_CONNECTION, *, collection_nam
                                        metadatas=[{**base, **metadata} for _, metadata in chunks], ids=ids)
                 if hashlib.sha256(path.read_bytes()).hexdigest() != raw_hash:
                     raise ValueError("Sumber berubah saat diindeks; jalankan ulang.")
+                # Versi lama dicari lewat path ATAU nama file, agar file yang diperbarui dari path lain
+                # (laptop vs container) tidak meninggalkan versi lama yang masih aktif.
                 previous = conn.execute("""
                     SELECT id FROM documents WHERE collection_name = %s AND is_active AND
-                    (source_path = %s OR (source_path IS NULL AND title = %s)) AND id <> %s
+                    (source_path = %s OR title = %s) AND id <> %s
                 """, (collection_name, str(path), path.name, doc_id)).fetchall()
                 for (old_id,) in previous:
                     conn.execute("""

@@ -16,12 +16,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# 1) torch versi CPU dipasang lebih dulu agar tidak ikut menarik paket CUDA (beberapa GB).
+# 1) torch + torchvision versi CPU dipasang bersama lebih dulu: versinya cocok dan tidak menarik CUDA.
+#    torchvision dari PyPI yang tidak cocok membuat sentence_transformers gagal import.
 # 2) Sisa dependensi diambil dari pyproject.toml (sumber yang sama dengan dev lokal).
+# 3) Cek import di akhir agar build gagal bila embedding rusak.
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir uv \
- && uv pip install --system --no-cache --index-url https://download.pytorch.org/whl/cpu torch \
- && uv pip install --system --no-cache -r pyproject.toml
+ && uv pip install --system --no-cache --index-url https://download.pytorch.org/whl/cpu torch torchvision \
+ && uv pip install --system --no-cache -r pyproject.toml \
+ && python -c "import torch, torchvision, sentence_transformers; print('torch', torch.__version__, 'torchvision', torchvision.__version__)"
 
 # Model embedding dimuat dengan local_files_only=True (rag/vector_store.py),
 # jadi harus sudah ada di image. Samakan dengan EMBEDDING_MODEL di .env.

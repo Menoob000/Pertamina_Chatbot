@@ -1,0 +1,30 @@
+# Dipakai otomatis oleh BuildKit untuk deploy/hf-space/Dockerfile (menggantikan .dockerignore di root).
+# Beda dengan .dockerignore root: folder `data` IKUT masuk image, karena tools/rks/catalog.py
+# membaca PDF sumber RKS dari sana (tidak ada volume di Container Apps / HF Spaces).
+.git
+.github
+.venv
+.uv-cache
+.uv-python
+.worktrees
+.vscode
+__pycache__
+**/__pycache__
+*.py[cod]
+
+# Frontend di-deploy terpisah (Vercel). Linux case-sensitive: tulis dua-duanya.
+Frontend
+frontend
+**/node_modules
+
+output
+tmp
+tests
+
+# Rahasia: disuntikkan sebagai env saat runtime, jangan masuk image
+.env
+.env.*
+.aws
+.streamlit/secrets.toml
+credentials*.json
+token*.json

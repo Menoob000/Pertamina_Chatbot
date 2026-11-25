@@ -20,13 +20,20 @@ MANIFEST_PATH = Path("gdrive_sync_manifest.json")
 
 
 def load_gdrive_config() -> Dict[str, Any]:
-    """Load persisted Google Drive settings (folder ID, last sync timestamp)."""
+    """Load persisted Google Drive settings (folder ID, last sync timestamp).
+
+    Folder ID dari UI (gdrive_config.json) diprioritaskan. Bila kosong, dipakai env GDRIVE_FOLDER_ID
+    sebagai default, karena file config di container hilang saat restart/scale-to-zero.
+    """
+    cfg = {"folder_id": "", "last_sync": None, "total_synced_files": 0}
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except Exception:
             pass
-    return {"folder_id": "", "last_sync": None, "total_synced_files": 0}
+    if not cfg.get("folder_id"):
+        cfg["folder_id"] = os.getenv("GDRIVE_FOLDER_ID", "").strip()
+    return cfg
 
 
 def save_gdrive_config(config: Dict[str, Any]) -> None:
